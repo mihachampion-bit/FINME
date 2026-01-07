@@ -1,180 +1,36 @@
 <!DOCTYPE html>
 <html lang="ru">
 <head>
-<meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>FINME — Финансовый учёт</title>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FINME</title>
 
 <style>
-:root{
-  --bg:#f6f7f9;
-  --fg:#111;
-  --muted:#777;
-  --accent:#2563eb;
-  --border:#dcdfe4;
-  --expense:#dc2626;
-  --income:#16a34a;
-  --sticky-bg:#ffffffee;
-}
-
-*{box-sizing:border-box}
-body{
-  margin:0;
-  font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,sans-serif;
-  background:var(--bg);
-  color:var(--fg);
-}
-
-header{
-  position:sticky;
-  top:0;
-  z-index:50;
-  background:#fff;
-  border-bottom:1px solid var(--border);
-  display:flex;
-  gap:8px;
-  padding:8px;
-}
-
-header button{
-  padding:6px 10px;
-  border:1px solid var(--border);
-  background:#fff;
-  border-radius:6px;
-  cursor:pointer;
-}
-
-header button.active{
-  background:var(--accent);
-  color:#fff;
-  border-color:var(--accent);
-}
-
-main{padding:8px}
-
+body{margin:0;font-family:system-ui;background:#f6f7f9}
 .hidden{display:none}
+header{display:flex;gap:8px;padding:8px;background:#fff;border-bottom:1px solid #ddd}
+button{padding:6px 10px;border:1px solid #ccc;background:#fff;border-radius:6px;cursor:pointer}
+.table-wrap{overflow:auto;background:#fff;border:1px solid #ddd;margin:8px}
+table{border-collapse:collapse}
+th,td{border:1px solid #ddd;padding:4px 6px;font-size:13px}
+th{background:#fafafa}
+.sticky-left{position:sticky;left:0;background:#fff;z-index:2}
+.sticky-top{position:sticky;top:0;background:#fff;z-index:3}
 
-.table-wrap{
-  overflow:auto;
-  border:1px solid var(--border);
-  background:#fff;
-}
-
-table{
-  border-collapse:collapse;
-  width:max-content;
-  min-width:100%;
-}
-
-th,td{
-  border:1px solid var(--border);
-  padding:4px 6px;
-  font-size:13px;
-  text-align:right;
-  white-space:normal;
-}
-
-th{
-  background:#fafafa;
-  font-weight:600;
-}
-
-th.date{
-  text-align:center;
-}
-
-th.sticky-top{
-  position:sticky;
-  top:0;
-  z-index:5;
-  background:var(--sticky-bg);
-}
-
-td.sticky-left, th.sticky-left{
-  position:sticky;
-  left:0;
-  z-index:4;
-  background:var(--sticky-bg);
-  text-align:left;
-  min-width:140px;
-}
-
-td.sticky-left.level-0{
-  font-weight:700;
-  text-transform:uppercase;
-}
-
-td.sticky-left.level-1{
-  padding-left:18px;
-}
-
-.cell{
-  cursor:pointer;
-}
-
-.cell.expense{color:var(--expense)}
-.cell.income{color:var(--income)}
-
-footer{
-  margin-top:8px;
-  display:flex;
-  gap:8px;
-  flex-wrap:wrap;
-}
-
-footer button{
-  padding:6px 10px;
-  border:1px solid var(--border);
-  background:#fff;
-  border-radius:6px;
-  cursor:pointer;
-}
-
-/* Modal */
 .modal-backdrop{
-  position:fixed;
-  inset:0;
+  position:fixed;inset:0;
   background:#0006;
-  z-index:100;
   display:flex;
   align-items:center;
   justify-content:center;
+  z-index:100;
 }
-
 .modal{
   background:#fff;
-  width:95%;
-  max-width:520px;
-  max-height:90%;
-  overflow:auto;
-  border-radius:10px;
-  padding:10px;
-}
-
-.modal h3{margin:4px 0 8px}
-
-.modal label{
-  display:block;
-  font-size:12px;
-  margin-top:6px;
-}
-
-.modal input, .modal select, .modal textarea{
-  width:100%;
-  padding:6px;
-  font-size:14px;
-}
-
-.toast{
-  position:fixed;
-  bottom:10px;
-  left:50%;
-  transform:translateX(-50%);
-  background:#111;
-  color:#fff;
-  padding:8px 12px;
-  border-radius:6px;
-  z-index:200;
+  padding:12px;
+  width:90%;
+  max-width:400px;
+  border-radius:8px;
 }
 </style>
 </head>
@@ -182,183 +38,93 @@ footer button{
 <body>
 
 <header>
-  <button id="tabAccount" class="active">Учёт</button>
-  <button id="tabAnalytics">Аналитика</button>
+  <button id="btnAddDate">Добавить дату</button>
 </header>
 
-<main>
-  <section id="accountSection">
-    <div class="table-wrap" id="tableWrap"></div>
-  </section>
-
-  <section id="analyticsSection" class="hidden">
-    <div id="analyticsContent"></div>
-  </section>
-</main>
+<div class="table-wrap" id="tableWrap"></div>
 
 <div id="modalBackdrop" class="modal-backdrop hidden">
   <div class="modal">
     <h3 id="modalTitle"></h3>
-    <div id="modalBody"></div>
-    <button type="button" onclick="closeModal()">Закрыть</button>
+    <input id="amountInput" type="number" step="0.1" placeholder="Сумма">
+    <br><br>
+    <button id="btnAdd">Добавить</button>
+    <button id="btnClose">Закрыть</button>
   </div>
 </div>
 
 <script>
+/* ---------- helpers ---------- */
 const fmt=n=>n.toLocaleString("ru-RU",{minimumFractionDigits:1,maximumFractionDigits:1});
-const CURRENCY="руб.";
+const dates=[];
+let transactions=[];
+let currentDate=null;
 
-let dates=[],blocks=[],articles=[],transactions=[];
-let db;
-
-function uuid(){return crypto.randomUUID();}
-
-function parseDMY(s){
-  const m=/^(\\d{2})\\.(\\d{2})\\.(\\d{4})$/.exec(s);
-  if(!m)return null;
-  const d=new Date(+m[3],m[2]-1,+m[1]);
-  if(d.getDate()!=+m[1])return null;
-  return d;
-}
-function dmy(d){
-  return String(d.getDate()).padStart(2,"0")+"."+String(d.getMonth()+1).padStart(2,"0")+"."+d.getFullYear();
-}
-
-/* IndexedDB */
-function openDB(){
-  return new Promise(res=>{
-    const r=indexedDB.open("FINME_DB",1);
-    r.onupgradeneeded=e=>{
-      const db=e.target.result;
-      db.createObjectStore("blocks",{keyPath:"id"});
-      db.createObjectStore("articles",{keyPath:"id"});
-      db.createObjectStore("transactions",{keyPath:"id"});
-    };
-    r.onsuccess=e=>{db=e.target.result;res();};
-  });
-}
-function store(n,m="readonly"){return db.transaction(n,m).objectStore(n);}
-function getAll(n){return new Promise(r=>{const q=store(n).getAll();q.onsuccess=()=>r(q.result||[]);});}
-
-/* Init */
-async function init(){
-  await openDB();
-  blocks=await getAll("blocks");
-  articles=await getAll("articles");
-  transactions=await getAll("transactions");
-
-  if(!blocks.length){
-    const b1={id:uuid(),name:"ПРОДУКТЫ",hidden:false};
-    blocks=[b1];
-    articles=[{id:uuid(),blockId:b1.id,name:"Продукты",hidden:false}];
-    store("blocks","readwrite").put(b1);
-    store("articles","readwrite").put(articles[0]);
-  }
-
-  const start=new Date(new Date().getFullYear(),0,1);
-  for(let d=new Date();d>=start;d.setDate(d.getDate()-1)){
-    dates.push(dmy(new Date(d)));
-  }
-  render();
-}
-
-function sum(date,aid,type){
-  const iso=parseDMY(date).toISOString().slice(0,10);
-  return transactions.filter(t=>t.dateISO===iso&&t.articleId===aid&&t.type===type)
-    .reduce((s,t)=>s+t.amount,0);
-}
-
+/* ---------- render ---------- */
 function render(){
   const w=document.getElementById("tableWrap");
   w.innerHTML="";
   const t=document.createElement("table");
 
-  const h1=document.createElement("tr");
-  const th0=document.createElement("th");
-  th0.className="sticky-left sticky-top";
-  th0.textContent="Категория";
-  h1.appendChild(th0);
+  const h=document.createElement("tr");
+  const th=document.createElement("th");
+  th.textContent="Дата";
+  th.className="sticky-left sticky-top";
+  h.appendChild(th);
+  t.appendChild(h);
+
   dates.forEach(d=>{
-    const th=document.createElement("th");
-    th.colSpan=2;
-    th.className="sticky-top";
-    th.textContent=d;
-    h1.appendChild(th);
+    const tr=document.createElement("tr");
+    const td=document.createElement("td");
+    td.textContent=d;
+    td.className="sticky-left";
+    td.style.cursor="pointer";
+    td.addEventListener("click",()=>openModal(d));
+    tr.appendChild(td);
+    t.appendChild(tr);
   });
-  t.appendChild(h1);
 
-  const h2=document.createElement("tr");
-  h2.appendChild(document.createElement("th"));
-  dates.forEach(()=>{
-    h2.innerHTML+="<th>Р</th><th>П</th>";
-  });
-  t.appendChild(h2);
-
-  blocks.forEach(b=>{
-    const trB=document.createElement("tr");
-    const tdB=document.createElement("td");
-    tdB.className="sticky-left level-0";
-    tdB.textContent=b.name;
-    trB.appendChild(tdB);
-    trB.appendChild(document.createElement("td"));
-    t.appendChild(trB);
-
-    articles.filter(a=>a.blockId===b.id).forEach(a=>{
-      const tr=document.createElement("tr");
-      const td=document.createElement("td");
-      td.className="sticky-left level-1";
-      td.textContent=a.name;
-      tr.appendChild(td);
-
-      dates.forEach(d=>{
-        ["expense","income"].forEach(type=>{
-          const c=document.createElement("td");
-          c.className="cell "+type;
-          const s=sum(d,a.id,type);
-          c.textContent=s?fmt(s):"";
-          c.onclick=()=>openModal(d,a.id,type);
-          tr.appendChild(c);
-        });
-      });
-      t.appendChild(tr);
-    });
-  });
   w.appendChild(t);
 }
 
-function openModal(date,aid,type){
-  const iso=parseDMY(date).toISOString().slice(0,10);
-  document.getElementById("modalTitle").textContent=date;
-  const b=document.getElementById("modalBody");
-  b.innerHTML="";
+/* ---------- modal ---------- */
+const backdrop=document.getElementById("modalBackdrop");
+const title=document.getElementById("modalTitle");
+const amount=document.getElementById("amountInput");
 
-  const i=document.createElement("input");
-  i.type="number"; i.step="0.1"; i.placeholder="Сумма";
-  b.appendChild(i);
-
-  const btn=document.createElement("button");
-  btn.type="button";
-  btn.textContent="Добавить";
-  btn.onclick=()=>{
-    const v=+i.value;
-    if(v>0){
-      const t={id:uuid(),dateISO:iso,articleId:aid,type,amount:v};
-      transactions.push(t);
-      store("transactions","readwrite").put(t);
-      render();
-      closeModal();
-    }
-  };
-  b.appendChild(btn);
-
-  document.getElementById("modalBackdrop").classList.remove("hidden");
+function openModal(date){
+  currentDate=date;
+  title.textContent=date;
+  amount.value="";
+  backdrop.classList.remove("hidden");
 }
 
 function closeModal(){
-  document.getElementById("modalBackdrop").classList.add("hidden");
+  backdrop.classList.add("hidden");
+  currentDate=null;
 }
 
-init();
+/* ---------- events ---------- */
+document.getElementById("btnClose").addEventListener("click",closeModal);
+document.getElementById("btnAdd").addEventListener("click",()=>{
+  const v=+amount.value;
+  if(v>0){
+    transactions.push({date:currentDate,amount:v});
+    closeModal();
+  }
+});
+backdrop.addEventListener("click",closeModal);
+document.querySelector(".modal").addEventListener("click",e=>e.stopPropagation());
+
+document.getElementById("btnAddDate").addEventListener("click",()=>{
+  const s=prompt("Дата ДД.ММ.ГГГГ");
+  if(!s) return;
+  dates.unshift(s);
+  render();
+});
+
+/* ---------- start ---------- */
+render();
 </script>
 
 </body>
