@@ -14,6 +14,7 @@
 
   --leftW: 180px;
   --cellW: 92px;
+
   --zHead: 50;
   --zLeft: 40;
   --zCorner: 60;
@@ -52,7 +53,7 @@ main{height:calc(100vh - 86px);min-height:0;display:flex;flex-direction:column}
 .windowbar .hint{margin-left:auto;font-size:12px;color:var(--muted);text-align:right}
 .tableWrap{flex:1;min-height:0;overflow:auto;background:#fff}
 
-/* One table, sticky header + sticky left col */
+/* One table: sticky header + sticky left column */
 .ledgerTable{
   border-collapse:separate;border-spacing:0;
   width:max-content; min-width:100%;
@@ -118,6 +119,13 @@ small.muted{color:var(--muted)}
 .topbar{display:flex;gap:8px;align-items:center}
 .topbar h3{margin:0;font-size:16px;flex:1}
 .topbar button{border:1px solid var(--border);background:#fff;padding:6px 9px;border-radius:8px;cursor:pointer}
+
+.quickRow{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px}
+.quickRow .label{font-size:12px;color:var(--muted)}
+.quickRow button{padding:7px 9px}
+.quickRow button.qExpense{border-color:#f59e0b}
+.quickRow button.qIncome{border-color:#10b981}
+
 .card{border:1px solid var(--border);border-radius:10px;padding:8px}
 .cardTop{display:flex;gap:8px;align-items:baseline}
 .cardTop .title{font-weight:800;font-size:13px;flex:1}
@@ -127,14 +135,6 @@ small.muted{color:var(--muted)}
 .card .btnrow{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
 .card .btnrow button{border:1px solid var(--border);background:#fff;padding:7px 9px;border-radius:8px;cursor:pointer}
 .card .btnrow button.danger{background:var(--danger);border-color:var(--danger);color:#fff}
-
-.quickRow{
-  display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px
-}
-.quickRow .label{font-size:12px;color:var(--muted)}
-.quickRow button{padding:7px 9px}
-.quickRow button.qExpense{border-color:#f59e0b}
-.quickRow button.qIncome{border-color:#10b981}
 
 .toast{
   position:fixed;left:50%;bottom:16px;transform:translateX(-50%);
@@ -179,7 +179,11 @@ small.muted{color:var(--muted)}
         <button id="btnWinOlder">Старее ▶</button>
         <div class="hint" id="winHint"></div>
       </div>
-      <div class="tableWrap" id="tableWrap"></div>
+
+      <div class="tableWrap" id="tableWrap">
+        <div style="padding:12px;color:var(--muted);font-size:13px">Загрузка…</div>
+      </div>
+
       <div class="footerHelp">
         <b>Подсказки:</b><br/>
         • Клик/тап по сумме открывает “Детализацию”.<br/>
