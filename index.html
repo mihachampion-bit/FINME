@@ -165,15 +165,6 @@ footer button{
   font-size:14px;
 }
 
-.modal table{
-  width:100%;
-  margin-top:8px;
-}
-
-.modal table td{
-  font-size:12px;
-}
-
 .toast{
   position:fixed;
   bottom:10px;
@@ -193,357 +184,181 @@ footer button{
 <header>
   <button id="tabAccount" class="active">Учёт</button>
   <button id="tabAnalytics">Аналитика</button>
-  <button id="btnManage">☰ Управление</button>
 </header>
 
 <main>
-  <!-- ACCOUNT -->
   <section id="accountSection">
     <div class="table-wrap" id="tableWrap"></div>
-    <footer>
-      <button id="btnAddDate">Добавить дату</button>
-      <button id="btnExportJSON">Экспорт JSON</button>
-      <button id="btnExportCSV">Экспорт CSV</button>
-      <button id="btnImportJSON">Импорт JSON</button>
-      <button id="btnReset">Сброс</button>
-    </footer>
   </section>
 
-  <!-- ANALYTICS -->
   <section id="analyticsSection" class="hidden">
-    <p style="color:#555;font-size:14px">
-      Аналитика строится по всем транзакциям.  
-      (В этой версии — базовые суммы и доли расходов.)
-    </p>
     <div id="analyticsContent"></div>
   </section>
 </main>
 
-<!-- MODAL -->
 <div id="modalBackdrop" class="modal-backdrop hidden">
   <div class="modal">
     <h3 id="modalTitle"></h3>
     <div id="modalBody"></div>
-    <button onclick="closeModal()">Закрыть</button>
+    <button type="button" onclick="closeModal()">Закрыть</button>
   </div>
 </div>
 
 <script>
-/* =========================
-   Helpers
-========================= */
-const CURRENCY = "руб.";
-const fmt = n => n.toLocaleString("ru-RU",{minimumFractionDigits:1,maximumFractionDigits:1});
+const fmt=n=>n.toLocaleString("ru-RU",{minimumFractionDigits:1,maximumFractionDigits:1});
+const CURRENCY="руб.";
 
-function toast(msg){
-  const t=document.createElement("div");
-  t.className="toast";
-  t.textContent=msg;
-  document.body.appendChild(t);
-  setTimeout(()=>t.remove(),2500);
-}
+let dates=[],blocks=[],articles=[],transactions=[];
+let db;
+
+function uuid(){return crypto.randomUUID();}
 
 function parseDMY(s){
-  const m=/^(\d{2})\.(\d{2})\.(\d{4})$/.exec(s);
-  if(!m) return null;
+  const m=/^(\\d{2})\\.(\\d{2})\\.(\\d{4})$/.exec(s);
+  if(!m)return null;
   const d=new Date(+m[3],m[2]-1,+m[1]);
-  if(d.getDate()!=+m[1]||d.getMonth()!=m[2]-1) return null;
+  if(d.getDate()!=+m[1])return null;
   return d;
 }
 function dmy(d){
   return String(d.getDate()).padStart(2,"0")+"."+String(d.getMonth()+1).padStart(2,"0")+"."+d.getFullYear();
 }
 
-/* =========================
-   IndexedDB
-========================= */
-let db;
-const DB_NAME="FINME_DB";
-const DB_VER=1;
-
+/* IndexedDB */
 function openDB(){
-  return new Promise((res,rej)=>{
-    const r=indexedDB.open(DB_NAME,DB_VER);
+  return new Promise(res=>{
+    const r=indexedDB.open("FINME_DB",1);
     r.onupgradeneeded=e=>{
       const db=e.target.result;
-      db.createObjectStore("meta",{keyPath:"key"});
       db.createObjectStore("blocks",{keyPath:"id"});
       db.createObjectStore("articles",{keyPath:"id"});
       db.createObjectStore("transactions",{keyPath:"id"});
     };
-    r.onsuccess=e=>{db=e.target.result;res()};
-    r.onerror=e=>rej(e);
+    r.onsuccess=e=>{db=e.target.result;res();};
   });
 }
-function tx(store,mode="readonly"){
-  return db.transaction(store,mode).objectStore(store);
-}
+function store(n,m="readonly"){return db.transaction(n,m).objectStore(n);}
+function getAll(n){return new Promise(r=>{const q=store(n).getAll();q.onsuccess=()=>r(q.result||[]);});}
 
-/* =========================
-   State
-========================= */
-let blocks=[], articles=[], transactions=[], dates=[];
+/* Init */
+async function init(){
+  await openDB();
+  blocks=await getAll("blocks");
+  articles=await getAll("articles");
+  transactions=await getAll("transactions");
 
-/* =========================
-   Init data
-========================= */
-function uuid(){return crypto.randomUUID()}
-
-async function loadAll(){
-  blocks = await getAll("blocks");
-  articles = await getAll("articles");
-  transactions = await getAll("transactions");
-
-  if(blocks.length===0){
+  if(!blocks.length){
     const b1={id:uuid(),name:"ПРОДУКТЫ",hidden:false};
-    const b2={id:uuid(),name:"ТРАНСПОРТ",hidden:false};
-    blocks=[b1,b2];
-    articles=[
-      {id:uuid(),blockId:b1.id,name:"Продукты",hidden:false},
-      {id:uuid(),blockId:b1.id,name:"Напитки",hidden:false},
-      {id:uuid(),blockId:b2.id,name:"Метро",hidden:false},
-      {id:uuid(),blockId:b2.id,name:"Такси",hidden:false},
-    ];
-    await saveAll();
+    blocks=[b1];
+    articles=[{id:uuid(),blockId:b1.id,name:"Продукты",hidden:false}];
+    store("blocks","readwrite").put(b1);
+    store("articles","readwrite").put(articles[0]);
   }
 
   const start=new Date(new Date().getFullYear(),0,1);
-  const today=new Date();
-  dates=[];
-  for(let d=new Date(today);d>=start;d.setDate(d.getDate()-1)){
+  for(let d=new Date();d>=start;d.setDate(d.getDate()-1)){
     dates.push(dmy(new Date(d)));
   }
+  render();
 }
 
-function getAll(store){
-  return new Promise(res=>{
-    const r=tx(store).getAll();
-    r.onsuccess=()=>res(r.result||[]);
-  });
-}
-async function saveAll(){
-  await clearStore("blocks"); for(const b of blocks) tx("blocks","readwrite").put(b);
-  await clearStore("articles"); for(const a of articles) tx("articles","readwrite").put(a);
-  await clearStore("transactions"); for(const t of transactions) tx("transactions","readwrite").put(t);
-}
-function clearStore(s){
-  return new Promise(res=>{
-    const r=tx(s,"readwrite").clear();
-    r.onsuccess=()=>res();
-  });
-}
-
-/* =========================
-   Rendering table
-========================= */
-function renderTable(){
-  const wrap=document.getElementById("tableWrap");
-  wrap.innerHTML="";
-  const table=document.createElement("table");
-
-  // header
-  const trh=document.createElement("tr");
-  const th0=document.createElement("th");
-  th0.className="sticky-top sticky-left";
-  th0.textContent="Категория";
-  trh.appendChild(th0);
-
-  for(const d of dates){
-    const th=document.createElement("th");
-    th.colSpan=2;
-    th.className="date sticky-top";
-    th.textContent=d;
-    trh.appendChild(th);
-  }
-  table.appendChild(trh);
-
-  const trh2=document.createElement("tr");
-  const th00=document.createElement("th");
-  th00.className="sticky-top sticky-left";
-  trh2.appendChild(th00);
-  for(const _ of dates){
-    const thE=document.createElement("th"); thE.textContent="Р"; trh2.appendChild(thE);
-    const thI=document.createElement("th"); thI.textContent="П"; trh2.appendChild(thI);
-  }
-  table.appendChild(trh2);
-
-  for(const b of blocks.filter(b=>!b.hidden)){
-    const trB=document.createElement("tr");
-    const tdB=document.createElement("td");
-    tdB.textContent=b.name;
-    tdB.className="sticky-left level-0";
-    trB.appendChild(tdB);
-    trB.appendChild(document.createElement("td"));
-    table.appendChild(trB);
-
-    for(const a of articles.filter(a=>a.blockId===b.id && !a.hidden)){
-      const tr=document.createElement("tr");
-      const td=document.createElement("td");
-      td.textContent=a.name;
-      td.className="sticky-left level-1";
-      tr.appendChild(td);
-
-      for(const d of dates){
-        const sumE=sumCell(d,a.id,"expense");
-        const sumI=sumCell(d,a.id,"income");
-
-        const tdE=document.createElement("td");
-        tdE.className="cell expense";
-        tdE.textContent=sumE?fmt(sumE):"";
-        tdE.onclick=()=>openModal(d,b.id,a.id,"expense");
-        tr.appendChild(tdE);
-
-        const tdI=document.createElement("td");
-        tdI.className="cell income";
-        tdI.textContent=sumI?fmt(sumI):"";
-        tdI.onclick=()=>openModal(d,b.id,a.id,"income");
-        tr.appendChild(tdI);
-      }
-      table.appendChild(tr);
-    }
-  }
-
-  wrap.appendChild(table);
-}
-
-function sumCell(dmyDate,articleId,type){
-  const iso=parseDMY(dmyDate).toISOString().slice(0,10);
-  return transactions
-    .filter(t=>t.dateISO===iso && t.articleId===articleId && t.type===type)
+function sum(date,aid,type){
+  const iso=parseDMY(date).toISOString().slice(0,10);
+  return transactions.filter(t=>t.dateISO===iso&&t.articleId===aid&&t.type===type)
     .reduce((s,t)=>s+t.amount,0);
 }
 
-/* =========================
-   Modal
-========================= */
-let modalCtx=null;
+function render(){
+  const w=document.getElementById("tableWrap");
+  w.innerHTML="";
+  const t=document.createElement("table");
 
-function openModal(dmyDate,blockId,articleId,type){
-  modalCtx={dmyDate,blockId,articleId,type};
-  const iso=parseDMY(dmyDate).toISOString().slice(0,10);
-  document.getElementById("modalTitle").textContent=dmyDate;
-  const body=document.getElementById("modalBody");
-  body.innerHTML="";
+  const h1=document.createElement("tr");
+  const th0=document.createElement("th");
+  th0.className="sticky-left sticky-top";
+  th0.textContent="Категория";
+  h1.appendChild(th0);
+  dates.forEach(d=>{
+    const th=document.createElement("th");
+    th.colSpan=2;
+    th.className="sticky-top";
+    th.textContent=d;
+    h1.appendChild(th);
+  });
+  t.appendChild(h1);
 
-  const list=document.createElement("div");
-  for(const t of transactions.filter(t=>t.dateISO===iso && t.articleId===articleId)){
-    const row=document.createElement("div");
-    row.textContent=`${t.type==="expense"?"−":"+"}${fmt(t.amount)} ${t.source||""}`;
-    row.onclick=()=>{ transactions=transactions.filter(x=>x.id!==t.id); renderTable(); openModal(dmyDate,blockId,articleId,type); };
-    list.appendChild(row);
-  }
-  body.appendChild(list);
+  const h2=document.createElement("tr");
+  h2.appendChild(document.createElement("th"));
+  dates.forEach(()=>{
+    h2.innerHTML+="<th>Р</th><th>П</th>";
+  });
+  t.appendChild(h2);
 
-  const inp=document.createElement("input");
-  inp.type="number";
-  inp.step="0.1";
-  inp.placeholder="Сумма";
-  body.appendChild(inp);
+  blocks.forEach(b=>{
+    const trB=document.createElement("tr");
+    const tdB=document.createElement("td");
+    tdB.className="sticky-left level-0";
+    tdB.textContent=b.name;
+    trB.appendChild(tdB);
+    trB.appendChild(document.createElement("td"));
+    t.appendChild(trB);
+
+    articles.filter(a=>a.blockId===b.id).forEach(a=>{
+      const tr=document.createElement("tr");
+      const td=document.createElement("td");
+      td.className="sticky-left level-1";
+      td.textContent=a.name;
+      tr.appendChild(td);
+
+      dates.forEach(d=>{
+        ["expense","income"].forEach(type=>{
+          const c=document.createElement("td");
+          c.className="cell "+type;
+          const s=sum(d,a.id,type);
+          c.textContent=s?fmt(s):"";
+          c.onclick=()=>openModal(d,a.id,type);
+          tr.appendChild(c);
+        });
+      });
+      t.appendChild(tr);
+    });
+  });
+  w.appendChild(t);
+}
+
+function openModal(date,aid,type){
+  const iso=parseDMY(date).toISOString().slice(0,10);
+  document.getElementById("modalTitle").textContent=date;
+  const b=document.getElementById("modalBody");
+  b.innerHTML="";
+
+  const i=document.createElement("input");
+  i.type="number"; i.step="0.1"; i.placeholder="Сумма";
+  b.appendChild(i);
 
   const btn=document.createElement("button");
+  btn.type="button";
   btn.textContent="Добавить";
   btn.onclick=()=>{
-    const v=+inp.value;
+    const v=+i.value;
     if(v>0){
-      transactions.push({
-        id:uuid(),
-        dateISO:iso,
-        type,
-        blockId,
-        articleId,
-        amount:v
-      });
-      renderTable();
-      openModal(dmyDate,blockId,articleId,type);
+      const t={id:uuid(),dateISO:iso,articleId:aid,type,amount:v};
+      transactions.push(t);
+      store("transactions","readwrite").put(t);
+      render();
+      closeModal();
     }
   };
-  body.appendChild(btn);
+  b.appendChild(btn);
 
   document.getElementById("modalBackdrop").classList.remove("hidden");
 }
+
 function closeModal(){
   document.getElementById("modalBackdrop").classList.add("hidden");
 }
 
-/* =========================
-   Buttons
-========================= */
-document.getElementById("tabAccount").onclick=()=>{
-  accountSection.classList.remove("hidden");
-  analyticsSection.classList.add("hidden");
-};
-document.getElementById("tabAnalytics").onclick=()=>{
-  accountSection.classList.add("hidden");
-  analyticsSection.classList.remove("hidden");
-  analyticsContent.textContent="Всего расходов: "+
-    fmt(transactions.filter(t=>t.type==="expense").reduce((s,t)=>s+t.amount,0))+" "+CURRENCY;
-};
-
-document.getElementById("btnAddDate").onclick=()=>{
-  const s=prompt("Дата ДД.ММ.ГГГГ");
-  const d=parseDMY(s);
-  if(!d) return toast("Некорректная дата");
-  const f=dmy(d);
-  if(!dates.includes(f)){
-    dates.push(f);
-    dates.sort((a,b)=>parseDMY(b)-parseDMY(a));
-    renderTable();
-  }
-};
-
-document.getElementById("btnExportJSON").onclick=()=>{
-  const data={blocks,articles,transactions};
-  const a=document.createElement("a");
-  a.href=URL.createObjectURL(new Blob([JSON.stringify(data,null,2)],{type:"application/json"}));
-  a.download="finme.json";
-  a.click();
-};
-
-document.getElementById("btnExportCSV").onclick=()=>{
-  let csv="date,type,block,article,amount\n";
-  for(const t of transactions){
-    const b=blocks.find(b=>b.id===t.blockId)?.name||"";
-    const a=articles.find(a=>a.id===t.articleId)?.name||"";
-    csv+=`${t.dateISO},${t.type},${b},${a},${t.amount}\n`;
-  }
-  const a=document.createElement("a");
-  a.href=URL.createObjectURL(new Blob([csv],{type:"text/csv"}));
-  a.download="finme.csv";
-  a.click();
-};
-
-document.getElementById("btnImportJSON").onclick=()=>{
-  const i=document.createElement("input");
-  i.type="file";
-  i.accept=".json";
-  i.onchange=async()=>{
-    const d=JSON.parse(await i.files[0].text());
-    blocks=d.blocks||[];
-    articles=d.articles||[];
-    transactions=d.transactions||[];
-    await saveAll();
-    renderTable();
-  };
-  i.click();
-};
-
-document.getElementById("btnReset").onclick=async()=>{
-  if(confirm("Стереть все данные?")){
-    await clearStore("blocks");
-    await clearStore("articles");
-    await clearStore("transactions");
-    location.reload();
-  }
-};
-
-/* =========================
-   Start
-========================= */
-(async()=>{
-  await openDB();
-  await loadAll();
-  renderTable();
-})();
+init();
 </script>
 
 </body>
