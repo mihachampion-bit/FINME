@@ -178,6 +178,7 @@ small.muted{color:var(--muted)}
   <button id="tabLedger" class="active">Учет</button>
   <button id="tabAnalytics">Аналитика</button>
 </div>
+
 <main>
   <section id="viewLedger" class="view" style="display:block">
     <div class="ledgerShell">
@@ -199,6 +200,7 @@ small.muted{color:var(--muted)}
       </div>
     </div>
   </section>
+
   <section id="viewAnalytics" class="view" style="display:none">
     <div class="analytics">
       <div class="panel">
@@ -238,7 +240,6 @@ small.muted{color:var(--muted)}
           <small class="muted">Графики — Chart.js (CDN). Без интернета остаются таблицы.</small>
         </div>
       </div>
-
       <div class="panel">
         <h2>Расходы / Приходы / Сальдо</h2>
         <div style="overflow:auto">
@@ -306,10 +307,11 @@ small.muted{color:var(--muted)}
           <div style="flex:0;min-width:120px"><button type="submit" class="primary" style="width:100%">Добавить</button></div>
         </div>
       </form>
-      <div id="blocksList" style="margin-top:10px"></div>
       <div style="margin-top:8px;font-size:12px;color:var(--muted)">
-        Подсказка: перемещайте блоки кнопками ▲/▼ — порядок сохранится.
+        • ▲/▼ меняют порядок блоков (сохраняется).<br/>
+        • “Скрыть” не удаляет данные. “Удалить” удаляет блок/статьи и связанные расходы.
       </div>
+      <div id="blocksList" style="margin-top:10px"></div>
     </div>
 
     <div style="border-top:1px solid var(--border);margin-top:12px;padding-top:10px">
@@ -322,6 +324,9 @@ small.muted{color:var(--muted)}
         </div>
         <div class="actions" style="max-width:260px"><button type="submit" class="primary">Добавить</button></div>
       </form>
+      <div style="margin-top:8px;font-size:12px;color:var(--muted)">
+        • “Удалить” статью удаляет связанные расходы по этой статье.
+      </div>
       <div id="articlesList" style="margin-top:10px"></div>
     </div>
   </div>
@@ -397,10 +402,13 @@ const FRACTION_DIGITS = 1;
 
 const DB_NAME = 'finme-db';
 const DB_VERSION = 1;
-const SCHEMA_VERSION = 3; // (a) суммы по блокам в таблице, (b) приход отдельной строкой/ячейкой
+const SCHEMA_VERSION = 1;
 
 const LS_KEY = 'finme-storage-v1';
 
+/* Доходы: единая “категория” в таблице, но операции — как обычные tx */
+const INCOME_BLOCK_ID = '__income__';
+const INCOME_ARTICLE_ID = '__income__';
 const INCOME_SOURCE_DEFAULTS = ['зарплата','бонус','фриланс','проценты по вкладу','другое'];
 
 /* ===== Helpers ===== */
@@ -457,6 +465,8 @@ function getISOWeek(date){
   const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
   return Math.ceil((((d - yearStart)/86400000) + 1)/7);
 }
+</script>
+<script>
 /* ===== Storage (IndexedDB with localStorage fallback) ===== */
 let storageBackend = 'idb'; // 'idb' | 'ls'
 let db = null;
@@ -593,13 +603,13 @@ async function dbClearAll(){
   }
 }
 
-/* ===== State (as required) ===== */
+/* ===== State ===== */
 const state = {
   blocks: [], articles: [], dates: [], transactions: [],
   blockById: new Map(), articleById: new Map(),
   expenseSources: [],
   incomeSources: [],
-  products: [], // опции для "Описание/продукт"
+  products: [],
   currentCell: null
 };
 
@@ -627,7 +637,7 @@ function rebuildMaps(){
   state.products = Array.from(p).sort((a,b)=>a.localeCompare(b,'ru'));
 }
 
-/* (a) Порядок блоков: поле order */
+/* ===== Block ordering ===== */
 function blockSortKey(b){
   const o = Number.isFinite(+b.order) ? +b.order : null;
   return {has:(o!==null), order:(o!==null?o:0), name:String(b.name||'')};
@@ -648,9 +658,7 @@ async function ensureBlockOrderPersisted(){
   const byName = state.blocks.slice().sort((a,b)=>String(a.name||'').localeCompare(String(b.name||''),'ru'));
   let i=1;
   for (const b of byName){
-    if (!Number.isFinite(+b.order)){
-      b.order = i;
-    }
+    if (!Number.isFinite(+b.order)) b.order = i;
     i++;
   }
   for (const b of state.blocks) await dbPut('blocks', b);
@@ -703,6 +711,8 @@ async function loadState(){
   state.transactions = await dbGetAll('transactions');
   rebuildMaps();
 }
+</script>
+<script>
 /* ===== Windowing dates ===== */
 const ledgerWindow = { size: 45, offset: 0 };
 function clampWindow(){
@@ -714,11 +724,11 @@ function visibleDates(){
   return state.dates.slice(ledgerWindow.offset, Math.min(state.dates.length, ledgerWindow.offset + ledgerWindow.size));
 }
 
-function buildCellSums(){
+function buildExpenseByArticleDate(){
   const m = new Map();
   for (const t of state.transactions){
-    // (b) приход не делим по статьям в таблице, но операции храним как прежде; тут оставляем ключ по статье
-    const k = `${t.dateISO}|${t.articleId}|${t.type}`;
+    if (t.type !== 'expense') continue;
+    const k = `${t.dateISO}|${t.articleId}`;
     m.set(k, (m.get(k)||0) + (t.amount||0));
   }
   return m;
@@ -734,7 +744,7 @@ function buildIncomeByDate(){
 }
 
 function buildBlockExpenseByDate(){
-  const m = new Map(); // key `${dateISO}|${blockId}` => sum expense
+  const m = new Map(); // `${dateISO}|${blockId}` => sum expense
   for (const t of state.transactions){
     if (t.type !== 'expense') continue;
     const k = `${t.dateISO}|${t.blockId}`;
@@ -759,7 +769,7 @@ function renderLedger(){
   for (const v of byBlock.values()) v.sort((x,y)=>x.name.localeCompare(y.name,'ru'));
 
   const dates = visibleDates();
-  const sums = buildCellSums();
+  const expenseByArtDate = buildExpenseByArticleDate();
   const incomeByDate = buildIncomeByDate();
   const blockExpenseByDate = buildBlockExpenseByDate();
 
@@ -805,7 +815,7 @@ function renderLedger(){
 
   const tbody = document.createElement('tbody');
 
-  /* (b) единая строка приходов: одна ячейка на каждый день в колонке "Приходы" */
+  /* Единая строка приходов: одна ячейка “Приходы” на день */
   {
     const trInc = document.createElement('tr');
     trInc.className = 'incomeRow';
@@ -840,7 +850,7 @@ function renderLedger(){
     tdLB.textContent = b.name;
     trB.appendChild(tdLB);
 
-    /* (a) суммы по блоку на каждый день в колонке "Расходы" */
+    /* Сумма по блоку на каждый день в колонке "Расходы" (в шапке блока) */
     for (const iso of dates){
       const k = `${iso}|${b.id}`;
       const sumBlock = blockExpenseByDate.get(k) || 0;
@@ -867,8 +877,8 @@ function renderLedger(){
       tr.appendChild(tdL);
 
       for (const iso of dates){
-        const kE = `${iso}|${a.id}|expense`;
-        const sumE = sums.get(kE) || 0;
+        const kE = `${iso}|${a.id}`;
+        const sumE = expenseByArtDate.get(kE) || 0;
 
         const tdE = document.createElement('td');
         tdE.className = 'amount';
@@ -878,7 +888,7 @@ function renderLedger(){
         tdE.textContent = sumE ? formatAmount(sumE) : '';
 
         const tdI = document.createElement('td');
-        tdI.innerHTML = '&nbsp;'; // (b) по статьям доходы больше не показываем
+        tdI.innerHTML = '&nbsp;'; // доходы по статьям больше не выводим
 
         tr.appendChild(tdE);
         tr.appendChild(tdI);
@@ -960,7 +970,6 @@ function renderSourcesDatalist(kind){
     dl.appendChild(opt);
   }
 }
-
 function renderProductsDatalist(){
   const dl = $('productsDatalist');
   dl.innerHTML = '';
@@ -1007,8 +1016,7 @@ function openTxModal(dateISO, articleId, defaultType){
     const art = state.articleById.get(articleId);
     if (!art){ showToast('Статья не найдена.'); return; }
     const blk = state.blockById.get(art.blockId);
-    $('txMeta').textContent =
-      `${formatHumanDate(dateISO)} • ${blk?blk.name:'—'} → ${art.name} • Колонка: Расходы`;
+    $('txMeta').textContent = `${formatHumanDate(dateISO)} • ${blk?blk.name:'—'} → ${art.name} • Колонка: Расходы`;
   }
 
   $('txEditId').value='';
@@ -1030,6 +1038,8 @@ function openTxModal(dateISO, articleId, defaultType){
   openBackdrop('txBackdrop');
   setTimeout(()=> $('txAmount').focus(), 0);
 }
+</script>
+<script>
 function cellTxs(dateISO, articleId, type){
   if (type === 'income'){
     return state.transactions.filter(t=>t.dateISO===dateISO && t.type==='income');
@@ -1171,11 +1181,8 @@ async function upsertTxFromForm(e){
     if (!blockId) return showToast('Выберите блок.');
     if (!articleId) return showToast('Выберите статью.');
   } else {
-    // (b) приход не привязан к статьям; сохраняем как "свободный приход"
-    // Чтобы не ломать схему хранения, оставляем blockId/articleId пустыми строками (как валидные значения).
-    // Импорт/экспорт и аналитика не ломаются, потому что доходы считаются по type.
-    blockId = '';
-    articleId = '';
+    blockId = INCOME_BLOCK_ID;
+    articleId = INCOME_ARTICLE_ID;
   }
 
   const source = ($('txSource').value||'').trim();
@@ -1245,14 +1252,642 @@ $('btnTxClear').addEventListener('click', ()=>{
 $('btnTxClose').addEventListener('click', ()=> closeBackdrop('txBackdrop'));
 $('txBackdrop').addEventListener('click', (e)=>{ if (e.target===$('txBackdrop')) closeBackdrop('txBackdrop'); });
 
-/* ===== Manage panel (как было ранее: перемещение/скрытие/удаление) ===== */
-/* ... (вставьте сюда ваш блок Manage panel из предыдущей версии без изменений) ... */
+/* ===== Manage panel ===== */
+function renderManageRow({kind, id, title, hidden, blockId, blockIndex, blocksSortedLen}){
+  const row=document.createElement('div');
+  row.style.display='flex'; row.style.gap='8px'; row.style.alignItems='center';
+  row.style.flexWrap='wrap'; row.style.marginTop='8px';
 
-/* ===== Export / Import / Reset / Analytics / Tabs / Init (как было ранее) ===== */
-/* ВАЖНО: ниже — ваш код из предыдущей версии, без изменений, кроме:
-   - после loadState() в местах init/applyAnalytics/reset/import добавьте ensureBlockOrderPersisted()
-   - renderLedger() уже обновлен выше
-*/
+  const input=document.createElement('input');
+  input.value=title; input.style.flex='1'; input.style.minWidth='180px';
+
+  const btnSave=document.createElement('button');
+  btnSave.type='button'; btnSave.textContent='Сохранить';
+  btnSave.className='primary';
+
+  const btnToggle=document.createElement('button');
+  btnToggle.type='button'; btnToggle.textContent = hidden ? 'Восстановить' : 'Скрыть';
+
+  const btnDelete=document.createElement('button');
+  btnDelete.type='button'; btnDelete.textContent='Удалить';
+  btnDelete.className='danger';
+
+  let btnUp=null, btnDown=null;
+  if (kind==='block'){
+    btnUp=document.createElement('button');
+    btnUp.type='button'; btnUp.textContent='▲';
+    btnDown=document.createElement('button');
+    btnDown.type='button'; btnDown.textContent='▼';
+    btnUp.disabled = (blockIndex<=0);
+    btnDown.disabled = (blockIndex>=blocksSortedLen-1);
+  }
+
+  btnSave.addEventListener('click', async ()=>{
+    const name=(input.value||'').trim();
+    if (!name) return showToast('Название не может быть пустым.');
+    if (kind==='block'){
+      const b = state.blocks.find(x=>x.id===id); if (!b) return;
+      b.name=name; await dbPut('blocks', b);
+    } else {
+      const a = state.articles.find(x=>x.id===id); if (!a) return;
+      a.name=name; await dbPut('articles', a);
+    }
+    await loadState(); await ensureBlockOrderPersisted(); renderLedger(); renderManagePanel();
+    showToast('Переименовано.');
+  });
+
+  btnToggle.addEventListener('click', async ()=>{
+    if (kind==='block'){
+      const b = state.blocks.find(x=>x.id===id); if (!b) return;
+      b.hidden = !b.hidden; await dbPut('blocks', b);
+      if (b.hidden){
+        for (const a of state.articles.filter(x=>x.blockId===b.id)){
+          if (!a.hidden){ a.hidden=true; await dbPut('articles', a); }
+        }
+      }
+    } else {
+      const a = state.articles.find(x=>x.id===id); if (!a) return;
+      a.hidden = !a.hidden; await dbPut('articles', a);
+    }
+    await loadState(); await ensureBlockOrderPersisted(); renderLedger(); renderManagePanel();
+    showToast('Готово.');
+  });
+
+  btnDelete.addEventListener('click', async ()=>{
+    if (kind==='block'){
+      const b = state.blocks.find(x=>x.id===id); if (!b) return;
+
+      const txt =
+        `Удалить блок "${b.name}" НАВСЕГДА?\n` +
+        `Будут удалены: сам блок, его статьи и связанные РАСХОДЫ.\n` +
+        `Доходы не затрагиваются.`;
+
+      if (!confirm(txt)) return;
+
+      // удаляем статьи блока
+      const arts = state.articles.filter(a=>a.blockId===b.id);
+      const artIds = new Set(arts.map(a=>a.id));
+
+      for (const a of arts) await dbDelete('articles', a.id);
+      await dbDelete('blocks', b.id);
+
+      // удаляем связанные расходы
+      const toDeleteTx = state.transactions.filter(t=>t.type==='expense' && (t.blockId===b.id || artIds.has(t.articleId)));
+      for (const t of toDeleteTx) await dbDelete('transactions', t.id);
+
+    } else {
+      const a = state.articles.find(x=>x.id===id); if (!a) return;
+      if (!confirm(`Удалить статью "${a.name}" НАВСЕГДА?\nБудут удалены связанные РАСХОДЫ по этой статье.`)) return;
+
+      await dbDelete('articles', a.id);
+
+      const toDeleteTx = state.transactions.filter(t=>t.type==='expense' && t.articleId===a.id);
+      for (const t of toDeleteTx) await dbDelete('transactions', t.id);
+    }
+
+    await loadState(); await ensureBlockOrderPersisted(); renderLedger(); renderManagePanel();
+    showToast('Удалено.');
+  });
+
+  async function moveBlock(delta){
+    const blocksSorted = sortBlocks(state.blocks); // включая скрытые
+    const idx = blocksSorted.findIndex(x=>x.id===id);
+    const j = idx + delta;
+    if (idx<0 || j<0 || j>=blocksSorted.length) return;
+
+    const a = blocksSorted[idx];
+    const b = blocksSorted[j];
+
+    const oa = Number.isFinite(+a.order) ? +a.order : idx+1;
+    const ob = Number.isFinite(+b.order) ? +b.order : j+1;
+
+    a.order = ob;
+    b.order = oa;
+
+    await dbPut('blocks', a);
+    await dbPut('blocks', b);
+
+    await loadState(); await ensureBlockOrderPersisted(); renderLedger(); renderManagePanel();
+  }
+
+  if (btnUp) btnUp.addEventListener('click', ()=>moveBlock(-1));
+  if (btnDown) btnDown.addEventListener('click', ()=>moveBlock(+1));
+
+  row.appendChild(input);
+  row.appendChild(btnSave);
+  if (btnUp) row.appendChild(btnUp);
+  if (btnDown) row.appendChild(btnDown);
+  row.appendChild(btnToggle);
+  row.appendChild(btnDelete);
+
+  if (kind==='article' && blockId){
+    const b = state.blocks.find(x=>x.id===blockId);
+    const hint=document.createElement('div');
+    hint.style.width='100%'; hint.style.fontSize='12px'; hint.style.color='var(--muted)';
+    hint.textContent = b ? `Блок: ${b.name}` : 'Блок: —';
+    row.appendChild(hint);
+  }
+
+  return row;
+}
+
+function fillBlockSelectForManage(){
+  const sel = $('articleBlockSelect');
+  const blocks = sortBlocks(state.blocks);
+  sel.innerHTML='';
+  for (const b of blocks){
+    const opt=document.createElement('option');
+    opt.value=b.id; opt.textContent = b.name + (b.hidden?' (скрыт)':'');
+    sel.appendChild(opt);
+  }
+}
+
+function renderManagePanel(){
+  fillBlockSelectForManage();
+
+  const blocksList=$('blocksList');
+  blocksList.innerHTML='';
+  const blocksSorted = sortBlocks(state.blocks);
+
+  for (let i=0;i<blocksSorted.length;i++){
+    const b = blocksSorted[i];
+    blocksList.appendChild(renderManageRow({
+      kind:'block',
+      id:b.id,
+      title:b.name,
+      hidden:!!b.hidden,
+      blockIndex:i,
+      blocksSortedLen:blocksSorted.length
+    }));
+  }
+
+  const articlesList=$('articlesList');
+  articlesList.innerHTML='';
+  const byBlock=new Map();
+  for (const a of state.articles){
+    if (!byBlock.has(a.blockId)) byBlock.set(a.blockId, []);
+    byBlock.get(a.blockId).push(a);
+  }
+
+  for (const b of blocksSorted){
+    const group=document.createElement('div');
+    group.style.border='1px solid var(--border)';
+    group.style.borderRadius='10px';
+    group.style.padding='8px';
+    group.style.marginBottom='10px';
+
+    const head=document.createElement('div');
+    head.style.fontWeight='900'; head.style.textTransform='uppercase';
+    head.textContent=b.name + (b.hidden?' (скрыт)':'');
+    group.appendChild(head);
+
+    const list=(byBlock.get(b.id)||[]).slice().sort((x,y)=>x.name.localeCompare(y.name,'ru'));
+    if (!list.length){
+      const empty=document.createElement('div');
+      empty.style.marginTop='6px'; empty.style.fontSize='12px'; empty.style.color='var(--muted)';
+      empty.textContent='Нет статей.';
+      group.appendChild(empty);
+    } else {
+      for (const a of list){
+        group.appendChild(renderManageRow({kind:'article', id:a.id, title:a.name, hidden:!!a.hidden, blockId:a.blockId}));
+      }
+    }
+
+    articlesList.appendChild(group);
+  }
+}
+
+$('btnMenu').addEventListener('click', async ()=>{ await loadState(); await ensureBlockOrderPersisted(); renderManagePanel(); openBackdrop('manageBackdrop'); setTimeout(()=> $('newBlockName').focus(), 0); });
+$('btnManageClose').addEventListener('click', ()=> closeBackdrop('manageBackdrop'));
+$('manageBackdrop').addEventListener('click', (e)=>{ if (e.target===$('manageBackdrop')) closeBackdrop('manageBackdrop'); });
+
+$('formAddBlock').addEventListener('submit', async (e)=>{
+  e.preventDefault();
+  const name=($('newBlockName').value||'').trim();
+  if (!name) return showToast('Введите название блока.');
+
+  await loadState(); await ensureBlockOrderPersisted();
+  const maxOrder = sortBlocks(state.blocks).reduce((m,b)=>Math.max(m, Number.isFinite(+b.order)?+b.order:0), 0);
+
+  await dbPut('blocks',{id:uid(),name,hidden:false,order:maxOrder+1});
+  $('newBlockName').value='';
+  await loadState(); await ensureBlockOrderPersisted(); renderLedger(); renderManagePanel();
+  showToast('Блок добавлен.');
+});
+
+$('formAddArticle').addEventListener('submit', async (e)=>{
+  e.preventDefault();
+  const blockId=$('articleBlockSelect').value;
+  const name=($('newArticleName').value||'').trim();
+  if (!blockId) return showToast('Выберите блок.');
+  if (!name) return showToast('Введите название статьи.');
+  await dbPut('articles',{id:uid(),blockId,name,hidden:false});
+  $('newArticleName').value='';
+  await loadState(); await ensureBlockOrderPersisted(); renderLedger(); renderManagePanel();
+  showToast('Статья добавлена.');
+});
+
+/* ===== Export / Import / Reset ===== */
+function downloadText(filename, text, mime='text/plain'){
+  const blob=new Blob([text],{type:mime});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement('a');
+  a.href=url; a.download=filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+}
+function pickFile(accept='.json'){
+  return new Promise((resolve)=>{
+    const inp=document.createElement('input');
+    inp.type='file'; inp.accept=accept;
+    inp.onchange=()=>resolve(inp.files && inp.files[0] ? inp.files[0] : null);
+    inp.click();
+  });
+}
+function readFileText(file){
+  return new Promise((resolve,reject)=>{
+    const r=new FileReader();
+    r.onload=()=>resolve(String(r.result||''));
+    r.onerror=()=>reject(r.error);
+    r.readAsText(file);
+  });
+}
+
+async function snapshotData(){
+  await loadState();
+  await ensureBlockOrderPersisted();
+  return {
+    app: APP_NAME,
+    exportedAt: new Date().toISOString(),
+    schemaVersion: SCHEMA_VERSION,
+    currency: CURRENCY,
+    fractionDigits: FRACTION_DIGITS,
+    storageBackend,
+    blocks: state.blocks,
+    articles: state.articles,
+    dates: state.dates,
+    transactions: state.transactions
+  };
+}
+
+async function exportJSON(){
+  const snap=await snapshotData();
+  downloadText(`FINME-backup-${toISODate(new Date())}.json`, JSON.stringify(snap,null,2), 'application/json');
+  showToast('Экспорт JSON готов.');
+}
+
+function csvEscape(v){
+  const s=String(v??'');
+  if (/[",\n\r;]/.test(s)) return `"${s.replace(/"/g,'""')}"`;
+  return s;
+}
+async function exportCSV(){
+  await loadState(); rebuildMaps();
+  const header=['dateISO','date','type','block','article','source','title','amount','time','note'];
+  const rows=[header.join(';')];
+
+  const txs=state.transactions.slice().sort((a,b)=>{
+    if (a.dateISO!==b.dateISO) return a.dateISO<b.dateISO?1:-1;
+    return (a.time||'').localeCompare(b.time||'');
+  });
+
+  for (const t of txs){
+    const b=state.blockById.get(t.blockId);
+    const a=state.articleById.get(t.articleId);
+    rows.push([
+      csvEscape(t.dateISO),
+      csvEscape(formatHumanDate(t.dateISO)),
+      csvEscape(t.type),
+      csvEscape(t.type==='income' ? '' : (b?b.name:'')),
+      csvEscape(t.type==='income' ? '' : (a?a.name:'')),
+      csvEscape(t.source||''),
+      csvEscape(t.title||''),
+      csvEscape(String(t.amount).replace('.',',')),
+      csvEscape(t.time||''),
+      csvEscape(t.note||'')
+    ].join(';'));
+  }
+
+  downloadText(`FINME-transactions-${toISODate(new Date())}.csv`, rows.join('\n'), 'text/csv;charset=utf-8');
+  showToast('Экспорт CSV готов.');
+}
+
+async function exportFlow(){
+  const c=prompt('Экспорт: 1=JSON (бэкап), 2=CSV (операции). Введите 1 или 2','1');
+  if (!c) return;
+  if (c.trim()==='1') return exportJSON();
+  if (c.trim()==='2') return exportCSV();
+  showToast('Не понял выбор.');
+}
+
+function normalizeImportedPayload(raw){
+  const out={
+    blocks:Array.isArray(raw.blocks)?raw.blocks:[],
+    articles:Array.isArray(raw.articles)?raw.articles:[],
+    dates:Array.isArray(raw.dates)?raw.dates:[],
+    transactions:Array.isArray(raw.transactions)?raw.transactions:[]
+  };
+
+  out.dates = out.dates
+    .map(d=> typeof d==='string'?d:(d&&typeof d.iso==='string'?d.iso:null))
+    .filter(Boolean)
+    .filter(iso=>/^\d{4}-\d{2}-\d{2}$/.test(iso))
+    .sort((a,b)=>a<b?1:a>b?-1:0);
+
+  out.blocks = out.blocks
+    .filter(b=>b&&b.id&&b.name)
+    .map(b=>({
+      id:String(b.id),
+      name:String(b.name),
+      hidden:!!b.hidden,
+      order: (Number.isFinite(+b.order) ? +b.order : undefined)
+    }));
+
+  out.articles = out.articles
+    .filter(a=>a&&a.id&&a.blockId&&a.name)
+    .map(a=>({id:String(a.id),blockId:String(a.blockId),name:String(a.name),hidden:!!a.hidden}));
+
+  out.transactions = out.transactions
+    .filter(t=>t&&t.id&&t.dateISO&&t.type&&t.amount)
+    .map(t=>{
+      const type = (t.type==='income')?'income':'expense';
+      let blockId = String(t.blockId||'');
+      let articleId = String(t.articleId||'');
+      if (type==='income'){
+        blockId = INCOME_BLOCK_ID;
+        articleId = INCOME_ARTICLE_ID;
+      }
+      return {
+        id:String(t.id),
+        dateISO:String(t.dateISO),
+        type,
+        blockId,
+        articleId,
+        source:String(t.source||''),
+        title:String(t.title||''),
+        amount:Number(t.amount),
+        time:String(t.time||''),
+        note:String(t.note||'')
+      };
+    })
+    .filter(t=>/^\d{4}-\d{2}-\d{2}$/.test(t.dateISO) && Number.isFinite(t.amount) && t.amount>0);
+
+  return out;
+}
+
+async function importJSON(){
+  try{
+    const file=await pickFile('.json,application/json');
+    if (!file) return;
+
+    // auto-backup
+    const snap=await snapshotData();
+    downloadText(`FINME-auto-backup-before-import-${toISODate(new Date())}.json`, JSON.stringify(snap,null,2), 'application/json');
+
+    const text=await readFileText(file);
+    const raw=JSON.parse(text);
+    const payload=normalizeImportedPayload(raw);
+
+    await dbClearAll();
+    await dbPut('meta',{key:'schemaVersion',value:SCHEMA_VERSION});
+    for (const b of payload.blocks) await dbPut('blocks', b);
+    for (const a of payload.articles) await dbPut('articles', a);
+    for (const iso of payload.dates) await dbPut('dates', { iso });
+    for (const t of payload.transactions) await dbPut('transactions', t);
+
+    await loadState();
+    await ensureBlockOrderPersisted();
+    ledgerWindow.offset=0;
+    renderLedger();
+
+    if ($('manageBackdrop').style.display==='flex') renderManagePanel();
+    if ($('txBackdrop').style.display==='flex') renderTxListForCell();
+
+    showToast(`Импорт: блоки ${payload.blocks.length}, статьи ${payload.articles.length}, даты ${payload.dates.length}, операции ${payload.transactions.length}.`);
+  }catch(e){
+    console.error(e);
+    showToast('Импорт не удался. Проверь JSON.');
+  }
+}
+
+async function resetAll(){
+  if (!confirm('СБРОСИТЬ ВСЕ ДАННЫЕ?')) return;
+  await dbClearAll();
+  await ensureInitialData();
+  await loadState();
+  await ensureBlockOrderPersisted();
+  ledgerWindow.offset=0;
+  renderLedger();
+  showToast('Сброс выполнен.');
+}
+
+$('btnExport').addEventListener('click', exportFlow);
+$('btnImport').addEventListener('click', importJSON);
+$('btnReset').addEventListener('click', resetAll);
+
+/* ===== Analytics (Chart.js graceful) ===== */
+let chartLibReady=false, chartTotals=null, chartShare=null;
+
+function loadChartJs(){
+  return new Promise((resolve)=>{
+    if (window.Chart){ chartLibReady=true; return resolve(true); }
+    const s=document.createElement('script');
+    s.src='https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js';
+    s.onload=()=>{ chartLibReady=true; resolve(true); };
+    s.onerror=()=>{ chartLibReady=false; resolve(false); };
+    document.head.appendChild(s);
+  });
+}
+function destroyCharts(){
+  if (chartTotals){ chartTotals.destroy(); chartTotals=null; }
+  if (chartShare){ chartShare.destroy(); chartShare=null; }
+}
+
+function periodKey(dateISO, period){
+  const d=fromISODate(dateISO);
+  const y=d.getFullYear();
+  const m=d.getMonth()+1;
+  if (period==='day') return dateISO;
+  if (period==='week') return `${y}-W${String(getISOWeek(d)).padStart(2,'0')}`;
+  if (period==='month') return `${y}-${String(m).padStart(2,'0')}`;
+  if (period==='halfyear') return `${y}-H${m<=6?1:2}`;
+  if (period==='year') return `${y}`;
+  return dateISO;
+}
+function periodLabel(key, period){
+  if (period==='day') return formatHumanDate(key);
+  if (period==='week') return `ISO ${key}`;
+  if (period==='month'){ const [y,mm]=key.split('-'); return `${mm}.${y}`; }
+  if (period==='halfyear'){ const [y,h]=key.split('-H'); return `${h}-е полугодие ${y}`; }
+  if (period==='year') return `Год ${key}`;
+  return key;
+}
+
+function normalizeHumanDateInput(el){
+  const raw=(el.value||'').trim();
+  if (!raw) return;
+  if (/^\d{8}$/.test(raw)) el.value=`${raw.slice(0,2)}.${raw.slice(2,4)}.${raw.slice(4,8)}`;
+}
+$('anFrom').addEventListener('blur',(e)=>normalizeHumanDateInput(e.target));
+$('anTo').addEventListener('blur',(e)=>normalizeHumanDateInput(e.target));
+
+function parseFilterRange(){
+  const fs=($('anFrom').value||'').trim();
+  const ts=($('anTo').value||'').trim();
+  let from=null,to=null;
+  if (fs){ const d=parseHumanDate(fs); if(!d) return {error:'Некорректная дата "с".'}; from=toISODate(d); }
+  if (ts){ const d=parseHumanDate(ts); if(!d) return {error:'Некорректная дата "по".'}; to=toISODate(d); }
+  if (from && to && from>to) return {error:'"с" не может быть позже "по".'};
+  return {from,to};
+}
+function inRange(t, from, to){
+  if (from && t.dateISO<from) return false;
+  if (to && t.dateISO>to) return false;
+  return true;
+}
+
+function aggregateTotals(period, from, to){
+  const m=new Map();
+  for (const t of state.transactions){
+    if (!inRange(t,from,to)) continue;
+    const k=periodKey(t.dateISO, period);
+    if (!m.has(k)) m.set(k,{expense:0,income:0});
+    m.get(k)[t.type] += (t.amount||0);
+  }
+  const keys=Array.from(m.keys()).sort((a,b)=>a<b?-1:a>b?1:0);
+  return keys.map(k=>{
+    const v=m.get(k);
+    return {key:k,label:periodLabel(k,period),expense:v.expense,income:v.income,saldo:v.income-v.expense};
+  });
+}
+function aggregateExpenseShares(dimension, from, to){
+  const m=new Map();
+  for (const t of state.transactions){
+    if (t.type!=='expense') continue;
+    if (!inRange(t,from,to)) continue;
+    const id = (dimension==='blocks') ? t.blockId : t.articleId;
+    m.set(id,(m.get(id)||0)+(t.amount||0));
+  }
+  const total=Array.from(m.values()).reduce((a,b)=>a+b,0);
+  const rows=Array.from(m.entries()).map(([id,sum])=>{
+    let name='';
+    if (dimension==='blocks'){
+      const b=state.blockById.get(id); name=b?b.name:'(неизвестный блок)';
+    } else {
+      const a=state.articleById.get(id);
+      if (a){ const b=state.blockById.get(a.blockId); name=`${b?b.name+' → ':''}${a.name}`; }
+      else name='(неизвестная статья)';
+    }
+    return {id,name,sum,share: total?sum/total:0};
+  }).sort((x,y)=>y.sum-x.sum);
+  return {total,rows};
+}
+
+function renderTotalsTable(items){
+  const tb=$('anTotalsTbody'); tb.innerHTML='';
+  if (!items.length){
+    tb.innerHTML=`<tr><td colspan="4" style="padding:8px;color:var(--muted);border:1px solid var(--border)">Нет данных.</td></tr>`;
+    return;
+  }
+  for (const it of items){
+    const tr=document.createElement('tr');
+    tr.innerHTML=`
+      <td style="border:1px solid var(--border);padding:6px">${it.label}</td>
+      <td style="border:1px solid var(--border);padding:6px;text-align:right">${it.expense?formatAmount(it.expense):''}</td>
+      <td style="border:1px solid var(--border);padding:6px;text-align:right">${it.income?formatAmount(it.income):''}</td>
+      <td style="border:1px solid var(--border);padding:6px;text-align:right">${it.saldo?formatAmount(it.saldo):''}</td>
+    `;
+    tb.appendChild(tr);
+  }
+}
+function renderShareTable(rows,total){
+  const tb=$('anShareTbody'); tb.innerHTML='';
+  if (!rows.length){
+    tb.innerHTML=`<tr><td colspan="3" style="padding:8px;color:var(--muted);border:1px solid var(--border)">Нет расходов.</td></tr>`;
+    return;
+  }
+  for (const r of rows){
+    const tr=document.createElement('tr');
+    tr.innerHTML=`
+      <td style="border:1px solid var(--border);padding:6px">${r.name}</td>
+      <td style="border:1px solid var(--border);padding:6px;text-align:right">${r.sum?formatAmount(r.sum):''}</td>
+      <td style="border:1px solid var(--border);padding:6px;text-align:right">${total?(r.share*100).toFixed(1)+'%':''}</td>
+    `;
+    tb.appendChild(tr);
+  }
+}
+
+function renderTotalsChart(items){
+  const canvas=$('anTotalsChart');
+  if (!chartLibReady || !window.Chart){ canvas.style.display='none'; return; }
+  canvas.style.display='block';
+  const ctx=canvas.getContext('2d');
+  chartTotals=new Chart(ctx,{
+    type:'bar',
+    data:{labels:items.map(x=>x.label),datasets:[
+      {label:'Расходы',data:items.map(x=>x.expense)},
+      {label:'Приходы',data:items.map(x=>x.income)},
+      {label:'Сальдо',data:items.map(x=>x.saldo)}
+    ]},
+    options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{position:'bottom'}},scales:{y:{beginAtZero:true}}}
+  });
+}
+function renderShareChart(rows){
+  const canvas=$('anShareChart');
+  if (!chartLibReady || !window.Chart){ canvas.style.display='none'; return; }
+  canvas.style.display='block';
+  const ctx=canvas.getContext('2d');
+  const top=rows.slice(0,12);
+  chartShare=new Chart(ctx,{
+    type:'bar',
+    data:{labels:top.map(x=>x.name),datasets:[{label:'Расходы',data:top.map(x=>x.sum)}]},
+    options:{indexAxis:'y',responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{x:{beginAtZero:true}}}
+  });
+}
+
+async function applyAnalytics(){
+  await loadState();
+  await ensureBlockOrderPersisted();
+  const r=parseFilterRange();
+  if (r.error){ showToast(r.error); return; }
+  const period=$('anPeriod').value;
+  const dim=$('anDimension').value;
+
+  const totals=aggregateTotals(period,r.from,r.to);
+  renderTotalsTable(totals);
+
+  const shares=aggregateExpenseShares(dim,r.from,r.to);
+  renderShareTable(shares.rows,shares.total);
+
+  destroyCharts();
+  await loadChartJs();
+  destroyCharts();
+  renderTotalsChart(totals);
+  renderShareChart(shares.rows);
+
+  showToast('Аналитика обновлена.');
+}
+$('btnAnApply').addEventListener('click', applyAnalytics);
+$('btnAnToday').addEventListener('click', ()=>{ const s=new Date().toLocaleDateString('ru-RU'); $('anFrom').value=s; $('anTo').value=s; applyAnalytics(); });
+
+/* ===== Tabs ===== */
+function setTab(name){
+  $('tabLedger').classList.toggle('active', name==='ledger');
+  $('tabAnalytics').classList.toggle('active', name==='analytics');
+  $('viewLedger').style.display = (name==='ledger') ? 'block' : 'none';
+  $('viewAnalytics').style.display = (name==='analytics') ? 'block' : 'none';
+}
+$('tabLedger').addEventListener('click', ()=> setTab('ledger'));
+$('tabAnalytics').addEventListener('click', async ()=>{
+  setTab('analytics');
+  if (!($('anFrom').value||'').trim() && !($('anTo').value||'').trim()){
+    const now=new Date();
+    const from=new Date(now.getFullYear(), now.getMonth(), 1);
+    $('anFrom').value=from.toLocaleDateString('ru-RU');
+    $('anTo').value=now.toLocaleDateString('ru-RU');
+  }
+  await applyAnalytics();
+});
 
 /* ===== Global UX ===== */
 document.addEventListener('keydown',(e)=>{
@@ -1291,7 +1926,7 @@ async function init(){
   }
 }
 init();
-
 </script>
+
 </body>
 </html>
