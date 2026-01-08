@@ -93,12 +93,14 @@ main{height:calc(100vh - 86px);min-height:0;display:flex;flex-direction:column}
   background:#f3f4f6;
 }
 .ledgerTable .blockRow td:not(.leftCell){background:#f3f4f6}
-.ledgerTable .incomeRow .leftCell{
+
+/* ТОТАЛ */
+.ledgerTable .totalRow .leftCell{
   font-weight:900;
   text-transform:uppercase;
   background:#eef2ff;
 }
-.ledgerTable .incomeRow td:not(.leftCell){background:#eef2ff}
+.ledgerTable .totalRow td:not(.leftCell){background:#eef2ff}
 
 .ledgerTable .articleName{padding-left:18px}
 .ledgerTable td.amount{text-align:right;cursor:pointer;min-width:var(--cellW)}
@@ -355,6 +357,9 @@ small.muted{color:var(--muted)}
         <option value="expense">Расход</option>
         <option value="income">Приход</option>
       </select>
+
+      <label>Дата (ДД.ММ.ГГГГ)</label>
+      <input id="txDate" placeholder="07.01.2026" inputmode="numeric" />
 
       <div class="row" id="txBlockArticleRow">
         <div><label>Блок</label><select id="txBlock"></select></div>
@@ -753,6 +758,15 @@ function buildBlockExpenseByDate(){
   return m;
 }
 
+function buildTotalExpenseByDate(){
+  const m = new Map(); // dateISO => total expense
+  for (const t of state.transactions){
+    if (t.type !== 'expense') continue;
+    m.set(t.dateISO, (m.get(t.dateISO)||0) + (t.amount||0));
+  }
+  return m;
+}
+
 /* ===== Ledger render (ONE table => no desync) ===== */
 function renderLedger(){
   const host = $('tableWrap');
@@ -772,6 +786,7 @@ function renderLedger(){
   const expenseByArtDate = buildExpenseByArticleDate();
   const incomeByDate = buildIncomeByDate();
   const blockExpenseByDate = buildBlockExpenseByDate();
+  const totalExpenseByDate = buildTotalExpenseByDate();
 
   const total = state.dates.length;
   const start = ledgerWindow.offset + 1;
@@ -815,30 +830,33 @@ function renderLedger(){
 
   const tbody = document.createElement('tbody');
 
-  /* Единая строка приходов: одна ячейка “Приходы” на день */
+  /* ТОТАЛ: расходы автосумма дня, приходы — ввод как раньше */
   {
-    const trInc = document.createElement('tr');
-    trInc.className = 'incomeRow';
+    const trTotal = document.createElement('tr');
+    trTotal.className = 'totalRow';
 
     const tdL = document.createElement('td');
     tdL.className = 'leftCell';
-    tdL.textContent = 'ПРИХОДЫ';
-    trInc.appendChild(tdL);
+    tdL.textContent = 'ТОТАЛ';
+    trTotal.appendChild(tdL);
 
     for (const iso of dates){
-      const tdBlankE = document.createElement('td');
-      tdBlankE.innerHTML = '&nbsp;';
-      trInc.appendChild(tdBlankE);
+      const sumDay = totalExpenseByDate.get(iso) || 0;
+
+      const tdSumE = document.createElement('td');
+      tdSumE.className = 'sumCell';
+      tdSumE.textContent = sumDay ? formatAmount(sumDay) : '';
+      trTotal.appendChild(tdSumE);
 
       const tdI = document.createElement('td');
       tdI.className = 'amount';
       tdI.dataset.date = iso;
       tdI.dataset.type = 'income';
       tdI.textContent = (incomeByDate.get(iso) || 0) ? formatAmount(incomeByDate.get(iso)) : '';
-      trInc.appendChild(tdI);
+      trTotal.appendChild(tdI);
     }
 
-    tbody.appendChild(trInc);
+    tbody.appendChild(trTotal);
   }
 
   for (const b of blocks){
@@ -888,7 +906,7 @@ function renderLedger(){
         tdE.textContent = sumE ? formatAmount(sumE) : '';
 
         const tdI = document.createElement('td');
-        tdI.innerHTML = '&nbsp;'; // доходы по статьям больше не выводим
+        tdI.innerHTML = '&nbsp;'; // доходы по статьям не выводим
 
         tr.appendChild(tdE);
         tr.appendChild(tdI);
@@ -994,6 +1012,13 @@ function normalizeTime(str){
   return `${String(hh).padStart(2,'0')}:${String(mm).padStart(2,'0')}`;
 }
 
+function normalizeHumanDateInputValue(raw){
+  const v = (raw||'').trim();
+  if (!v) return '';
+  if (/^\d{8}$/.test(v)) return `${v.slice(0,2)}.${v.slice(2,4)}.${v.slice(4,8)}`;
+  return v;
+}
+
 function applyTxFormMode(type){
   $('txType').value = type;
   const isIncome = (type === 'income');
@@ -1007,23 +1032,30 @@ function applyTxFormMode(type){
   renderProductsDatalist();
 }
 
+function renderTxMeta(){
+  const c = state.currentCell;
+  if (!c) return;
+
+  if (c.defaultType === 'income'){
+    $('txMeta').textContent = `${formatHumanDate(c.dateISO)} • ТОТАЛ • Колонка: Приходы`;
+  } else {
+    const art = state.articleById.get(c.articleId);
+    const blk = art ? state.blockById.get(art.blockId) : null;
+    $('txMeta').textContent = `${formatHumanDate(c.dateISO)} • ${blk?blk.name:'—'} → ${art?art.name:'—'} • Колонка: Расходы`;
+  }
+}
+
 function openTxModal(dateISO, articleId, defaultType){
   state.currentCell = { dateISO, articleId: articleId || null, defaultType };
-
-  if (defaultType === 'income'){
-    $('txMeta').textContent = `${formatHumanDate(dateISO)} • ПРИХОДЫ • Колонка: Приходы`;
-  } else {
-    const art = state.articleById.get(articleId);
-    if (!art){ showToast('Статья не найдена.'); return; }
-    const blk = state.blockById.get(art.blockId);
-    $('txMeta').textContent = `${formatHumanDate(dateISO)} • ${blk?blk.name:'—'} → ${art.name} • Колонка: Расходы`;
-  }
 
   $('txEditId').value='';
   applyTxFormMode(defaultType);
 
+  $('txDate').value = formatHumanDate(dateISO);
+
   if (defaultType === 'expense'){
     const art = state.articleById.get(articleId);
+    if (!art){ showToast('Статья не найдена.'); return; }
     fillBlockSelect($('txBlock'), art.blockId, false);
     fillArticleSelect($('txArticle'), art.blockId, art.id, false);
   }
@@ -1034,6 +1066,7 @@ function openTxModal(dateISO, articleId, defaultType){
   $('txTime').value='';
   $('txNote').value='';
 
+  renderTxMeta();
   renderTxListForCell();
   openBackdrop('txBackdrop');
   setTimeout(()=> $('txAmount').focus(), 0);
@@ -1088,6 +1121,7 @@ function renderTxListForCell(){
     const meta=document.createElement('div');
     meta.className='meta';
     const parts=[];
+    parts.push(formatHumanDate(t.dateISO));
     if (t.time) parts.push(t.time);
     if (t.source) parts.push(t.source);
     if (t.type==='expense'){
@@ -1131,6 +1165,8 @@ function loadTxToForm(t){
   $('txEditId').value=t.id;
   applyTxFormMode(t.type);
 
+  $('txDate').value = formatHumanDate(t.dateISO);
+
   if (t.type==='expense'){
     fillBlockSelect($('txBlock'), t.blockId, false);
     fillArticleSelect($('txArticle'), t.blockId, t.articleId, false);
@@ -1164,13 +1200,25 @@ $('btnQuickExpense').addEventListener('click', ()=> quickSetType('expense'));
 $('btnQuickIncome').addEventListener('click', ()=> quickSetType('income'));
 
 /* Save / Delete */
+async function ensureDateExists(iso){
+  if (state.dates.includes(iso)) return;
+  await dbPut('dates', { iso });
+  state.dates.push(iso);
+  state.dates.sort((a,b)=>a<b?1:a>b?-1:0);
+}
+
 async function upsertTxFromForm(e){
   e.preventDefault();
   const c = state.currentCell;
   if (!c) return;
 
-  const dateISO = c.dateISO;
   const type = $('txType').value;
+
+  const dateHuman = normalizeHumanDateInputValue($('txDate').value);
+  if (dateHuman) $('txDate').value = dateHuman;
+  const dd = parseHumanDate(dateHuman);
+  if (!dd) return showToast('Некорректная дата. Пример: 07.01.2026');
+  const dateISO = toISODate(dd);
 
   let blockId = '';
   let articleId = '';
@@ -1194,6 +1242,8 @@ async function upsertTxFromForm(e){
   if (!amount || amount<=0) return showToast('Сумма должна быть больше 0.');
   if (time === null) return showToast('Некорректное время. Пример: 09:05');
 
+  await ensureDateExists(dateISO);
+
   const editId = $('txEditId').value;
   const tx = {
     id: editId || uid(),
@@ -1214,6 +1264,17 @@ async function upsertTxFromForm(e){
   if (idx>=0) state.transactions[idx]=tx; else state.transactions.push(tx);
 
   rebuildMaps();
+
+  // если пользователь поправил дату — переносим “контекст ячейки” на новую дату
+  if (state.currentCell){
+    state.currentCell.dateISO = dateISO;
+    state.currentCell.defaultType = type;
+    if (type === 'income') state.currentCell.articleId = null;
+    // для expense articleId оставляем как есть (пользователь мог менять блок/статью в форме)
+    if (type === 'expense') state.currentCell.articleId = articleId;
+  }
+
+  renderTxMeta();
   renderTxListForCell();
   renderLedger();
 
@@ -1324,14 +1385,12 @@ function renderManageRow({kind, id, title, hidden, blockId, blockIndex, blocksSo
 
       if (!confirm(txt)) return;
 
-      // удаляем статьи блока
       const arts = state.articles.filter(a=>a.blockId===b.id);
       const artIds = new Set(arts.map(a=>a.id));
 
       for (const a of arts) await dbDelete('articles', a.id);
       await dbDelete('blocks', b.id);
 
-      // удаляем связанные расходы
       const toDeleteTx = state.transactions.filter(t=>t.type==='expense' && (t.blockId===b.id || artIds.has(t.articleId)));
       for (const t of toDeleteTx) await dbDelete('transactions', t.id);
 
