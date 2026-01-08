@@ -769,56 +769,103 @@ function buildTotalExpenseByDate(){
   return m;
 }
 
-/* ===== Change date for whole column (header click) ===== */
-async function changeColumnDateFlow(oldISO){
-  const oldHuman = formatHumanDate(oldISO);
-  const input = prompt(`Изменить дату колонки ${oldHuman} на (ДД.ММ.ГГГГ):`, oldHuman);
-  if (!input) return;
+/* ===== Dates: safe add / rename / swap (FIX) ===== */
+async function addDateFlow(){
+  try{
+    const str = prompt('Введите дату в формате ДД.ММ.ГГГГ', '');
+    if (!str) return;
 
-  const d = parseHumanDate(input.trim());
-  if (!d){ showToast('Некорректная дата. Пример: 07.01.2026'); return; }
+    const d = parseHumanDate(str.trim());
+    if (!d){ showToast('Некорректная дата. Пример: 07.01.2026'); return; }
 
-  const newISO = toISODate(d);
-  if (newISO === oldISO) return;
+    const iso = toISODate(d);
 
-  const exists = state.dates.includes(newISO);
+    await loadState();
+    if (state.dates.includes(iso)){
+      showToast('Такая дата уже есть.');
+      return;
+    }
 
-  if (exists){
-    const ok = confirm(
-      `Дата ${formatHumanDate(newISO)} уже есть.\n\n` +
-      `Сделать ОБМЕН колонками?\n` +
-      `• операции ${oldHuman} перейдут на ${formatHumanDate(newISO)}\n` +
-      `• операции ${formatHumanDate(newISO)} перейдут на ${oldHuman}`
-    );
-    if (!ok) return;
-    await swapDates(oldISO, newISO);
-  } else {
-    const ok = confirm(
-      `Переименовать колонку:\n${oldHuman} → ${formatHumanDate(newISO)}\n\n` +
-      `Все операции в этой колонке переедут на новую дату. Продолжить?`
-    );
-    if (!ok) return;
-    await renameDate(oldISO, newISO);
+    await dbPut('dates', { iso });
+
+    state.dates.push(iso);
+    state.dates.sort((a,b)=>a<b?1:a>b?-1:0);
+
+    ledgerWindow.offset = 0;
+    renderLedger();
+    showToast('Дата добавлена.');
+  }catch(e){
+    console.error(e);
+    showToast('Ошибка при добавлении даты. См. консоль.');
   }
-
-  await loadState();
-  renderLedger();
-  if ($('manageBackdrop').style.display==='flex') renderManagePanel();
-  if ($('txBackdrop').style.display==='flex') renderTxListForCell();
-  showToast('Дата колонки изменена.');
 }
 
-async function renameDate(oldISO, newISO){
-  await dbDelete('dates', oldISO);
+async function changeColumnDateFlow(oldISO){
+  try{
+    await loadState();
+
+    const oldHuman = formatHumanDate(oldISO);
+    const input = prompt(`Изменить дату колонки ${oldHuman} на (ДД.ММ.ГГГГ):`, oldHuman);
+    if (!input) return;
+
+    const d = parseHumanDate(input.trim());
+    if (!d){ showToast('Некорректная дата. Пример: 07.01.2026'); return; }
+
+    const newISO = toISODate(d);
+    if (newISO === oldISO) return;
+
+    const exists = state.dates.includes(newISO);
+
+    if (exists){
+      const ok = confirm(
+        `Дата ${formatHumanDate(newISO)} уже есть.\n\n` +
+        `Сделать ОБМЕН колонками?\n` +
+        `• операции ${oldHuman} перейдут на ${formatHumanDate(newISO)}\n` +
+        `• операции ${formatHumanDate(newISO)} перейдут на ${oldHuman}`
+      );
+      if (!ok) return;
+      await swapDatesSafe(oldISO, newISO);
+    } else {
+      const ok = confirm(
+        `Переименовать колонку:\n${oldHuman} → ${formatHumanDate(newISO)}\n\n` +
+        `Все операции в этой колонке переедут на новую дату. Продолжить?`
+      );
+      if (!ok) return;
+      await renameDateSafe(oldISO, newISO);
+    }
+
+    await loadState();
+    ledgerWindow.offset = 0;
+    renderLedger();
+
+    if ($('manageBackdrop').style.display==='flex') renderManagePanel();
+    if ($('txBackdrop').style.display==='flex') renderTxListForCell();
+
+    showToast('Дата колонки изменена.');
+  }catch(e){
+    console.error(e);
+    showToast('Ошибка при изменении даты. См. консоль.');
+  }
+}
+
+async function renameDateSafe(oldISO, newISO){
   await dbPut('dates', { iso: newISO });
 
   const affected = state.transactions.filter(t=>t.dateISO===oldISO);
   for (const t of affected){
     await dbPut('transactions', {...t, dateISO:newISO});
   }
+
+  // после переноса старую дату удаляем безопасно
+  // (перепроверим фактически по текущему state после loadState в вызывающей функции)
+  // но на всякий случай: если вдруг не осталось транзакций — удалим
+  const stillOld = state.transactions.some(t=>t.dateISO===oldISO);
+  if (!stillOld){
+    await dbDelete('dates', oldISO);
+  }
 }
 
-async function swapDates(aISO, bISO){
+async function swapDatesSafe(aISO, bISO){
   const aTx = state.transactions.filter(t=>t.dateISO===aISO);
   const bTx = state.transactions.filter(t=>t.dateISO===bISO);
   const tmpISO = '__tmp__' + uid();
@@ -916,7 +963,8 @@ function renderLedger(){
       tdI.className = 'amount';
       tdI.dataset.date = iso;
       tdI.dataset.type = 'income';
-      tdI.textContent = (incomeByDate.get(iso) || 0) ? formatAmount(incomeByDate.get(iso)) : '';
+      const inc = incomeByDate.get(iso) || 0;
+      tdI.textContent = inc ? formatAmount(inc) : '';
       trTotal.appendChild(tdI);
     }
 
@@ -1004,23 +1052,7 @@ function renderLedger(){
 $('btnWinNewer').addEventListener('click', ()=>{ ledgerWindow.offset = Math.max(0, ledgerWindow.offset - ledgerWindow.size); renderLedger(); });
 $('btnWinOlder').addEventListener('click', ()=>{ ledgerWindow.offset = ledgerWindow.offset + ledgerWindow.size; renderLedger(); });
 
-/* Add date */
-async function addDateFlow(){
-  const str = prompt('Введите дату в формате ДД.ММ.ГГГГ', '');
-  if (!str) return;
-  const d = parseHumanDate(str.trim());
-  if (!d){ showToast('Некорректная дата. Пример: 07.01.2026'); return; }
-  const iso = toISODate(d);
-  if (state.dates.includes(iso)){ showToast('Такая дата уже есть.'); return; }
-
-  await dbPut('dates', { iso });
-
-  state.dates.push(iso);
-  state.dates.sort((a,b)=>a<b?1:a>b?-1:0);
-  ledgerWindow.offset = 0;
-  renderLedger();
-  showToast('Дата добавлена.');
-}
+/* Add date button */
 $('btnAddDate').addEventListener('click', addDateFlow);
 
 /* ===== Tx modal ===== */
@@ -1810,7 +1842,9 @@ async function resetAll(){
 $('btnExport').addEventListener('click', exportFlow);
 $('btnImport').addEventListener('click', importJSON);
 $('btnReset').addEventListener('click', resetAll);
+</script>
 
+<script>
 /* ===== Analytics (Chart.js graceful) ===== */
 let chartLibReady=false, chartTotals=null, chartShare=null;
 
