@@ -170,7 +170,6 @@ small.muted{color:var(--muted)}
   <button id="tabLedger" class="active">Учет</button>
   <button id="tabAnalytics">Аналитика</button>
 </div>
-
 <main>
   <section id="viewLedger" class="view" style="display:block">
     <div class="ledgerShell">
@@ -300,6 +299,9 @@ small.muted{color:var(--muted)}
         </div>
       </form>
       <div id="blocksList" style="margin-top:10px"></div>
+      <div style="margin-top:8px;font-size:12px;color:var(--muted)">
+        Подсказка: перемещайте блоки кнопками ▲/▼ — порядок сохранится.
+      </div>
     </div>
 
     <div style="border-top:1px solid var(--border);margin-top:12px;padding-top:10px">
@@ -333,7 +335,6 @@ small.muted{color:var(--muted)}
       <button type="button" id="btnQuickIncome" class="qIncome">+ Приход</button>
       <span class="label">→ ставит тип и фокус на сумму</span>
     </div>
-
     <form id="txForm">
       <label>Тип</label>
       <select id="txType">
@@ -351,7 +352,9 @@ small.muted{color:var(--muted)}
       <datalist id="sourcesDatalist"></datalist>
 
       <label>Описание</label>
-      <input id="txTitleInput" placeholder="Например: кефир Простоквашино" />
+      <!-- (b) продукты/описания тоже сохраняются как опции -->
+      <input id="txTitleInput" list="productsDatalist" placeholder="Например: кефир Простоквашино" />
+      <datalist id="productsDatalist"></datalist>
 
       <div class="row">
         <div><label>Сумма</label><input id="txAmount" inputmode="decimal" placeholder="0,0" /></div>
@@ -386,7 +389,7 @@ const FRACTION_DIGITS = 1;
 
 const DB_NAME = 'finme-db';
 const DB_VERSION = 1;
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2; // (a)(c) добавили order и операции удаления
 
 const LS_KEY = 'finme-storage-v1';
 
@@ -580,29 +583,67 @@ async function dbClearAll(){
     });
   }
 }
-
 /* ===== State (as required) ===== */
 const state = {
   blocks: [], articles: [], dates: [], transactions: [],
   blockById: new Map(), articleById: new Map(),
   sources: [],
+  products: [], // (b) опции для "Описание/продукт"
   currentCell: null
 };
 
 function rebuildMaps(){
   state.blockById = new Map(state.blocks.map(b=>[b.id,b]));
   state.articleById = new Map(state.articles.map(a=>[a.id,a]));
+
   const s = new Set();
-  for (const t of state.transactions) if (t.source && String(t.source).trim()) s.add(String(t.source).trim());
+  const p = new Set();
+  for (const t of state.transactions){
+    if (t.source && String(t.source).trim()) s.add(String(t.source).trim());
+    if (t.title && String(t.title).trim()) p.add(String(t.title).trim());
+  }
   state.sources = Array.from(s).sort((a,b)=>a.localeCompare(b,'ru'));
+  state.products = Array.from(p).sort((a,b)=>a.localeCompare(b,'ru'));
 }
+
+/* (a) Порядок блоков: поле order (если старые данные без order — аккуратно проставим) */
+function blockSortKey(b){
+  const o = Number.isFinite(+b.order) ? +b.order : null;
+  return {has:(o!==null), order:(o!==null?o:0), name:String(b.name||'')};
+}
+function sortBlocks(arr){
+  return arr.slice().sort((x,y)=>{
+    const ax=blockSortKey(x), ay=blockSortKey(y);
+    if (ax.has && ay.has && ax.order!==ay.order) return ax.order - ay.order;
+    if (ax.has && !ay.has) return -1;
+    if (!ax.has && ay.has) return 1;
+    return ax.name.localeCompare(ay.name,'ru');
+  });
+}
+async function ensureBlockOrderPersisted(){
+  // Если у каких-то блоков нет order — назначаем order по текущему "старому" виду (по имени),
+  // чтобы визуально ничего не поменялось.
+  const missing = state.blocks.some(b=>!Number.isFinite(+b.order));
+  if (!missing) return;
+
+  const byName = state.blocks.slice().sort((a,b)=>String(a.name||'').localeCompare(String(b.name||''),'ru'));
+  let i=1;
+  for (const b of byName){
+    if (!Number.isFinite(+b.order)){
+      b.order = i;
+    }
+    i++;
+  }
+  for (const b of state.blocks) await dbPut('blocks', b);
+}
+
 async function seedDefaults(){
   const blocks = [
-    {id:uid(), name:'ПРОДУКТЫ', hidden:false},
-    {id:uid(), name:'ТРАНСПОРТ', hidden:false},
-    {id:uid(), name:'ДОМ', hidden:false},
-    {id:uid(), name:'ТЕЛЕКОММУНИКАЦИИ', hidden:false},
-    {id:uid(), name:'ЗДОРОВЬЕ', hidden:false},
+    {id:uid(), name:'ПРОДУКТЫ', hidden:false, order:1},
+    {id:uid(), name:'ТРАНСПОРТ', hidden:false, order:2},
+    {id:uid(), name:'ДОМ', hidden:false, order:3},
+    {id:uid(), name:'ТЕЛЕКОММУНИКАЦИИ', hidden:false, order:4},
+    {id:uid(), name:'ЗДОРОВЬЕ', hidden:false, order:5},
   ];
   const articles = [
     {id:uid(), blockId:blocks[0].id, name:'Овощи', hidden:false},
@@ -669,7 +710,8 @@ function renderLedger(){
   const host = $('tableWrap');
   host.innerHTML = '';
 
-  const blocks = state.blocks.filter(b=>!b.hidden).slice().sort((a,b)=>a.name.localeCompare(b.name,'ru'));
+  // (a) блоки теперь идут в сохраненном порядке, а не по имени
+  const blocks = sortBlocks(state.blocks.filter(b=>!b.hidden));
   const articles = state.articles.filter(a=>!a.hidden);
 
   const byBlock = new Map();
@@ -814,9 +856,7 @@ $('btnAddDate').addEventListener('click', addDateFlow);
 
 /* ===== Tx modal ===== */
 function fillBlockSelect(sel, selectedId=null, includeHidden=false){
-  const blocks = state.blocks
-    .filter(b=>includeHidden?true:!b.hidden)
-    .slice().sort((a,b)=>a.name.localeCompare(b.name,'ru'));
+  const blocks = sortBlocks(state.blocks.filter(b=>includeHidden?true:!b.hidden));
   sel.innerHTML = '';
   for (const b of blocks){
     const opt = document.createElement('option');
@@ -843,6 +883,15 @@ function renderSourcesDatalist(){
   const dl = $('sourcesDatalist');
   dl.innerHTML = '';
   for (const s of state.sources.slice(0, 300)){
+    const opt = document.createElement('option');
+    opt.value = s;
+    dl.appendChild(opt);
+  }
+}
+function renderProductsDatalist(){
+  const dl = $('productsDatalist');
+  dl.innerHTML = '';
+  for (const s of state.products.slice(0, 300)){
     const opt = document.createElement('option');
     opt.value = s;
     dl.appendChild(opt);
@@ -886,6 +935,7 @@ function openTxModal(dateISO, articleId, defaultType){
   $('txNote').value='';
 
   renderSourcesDatalist();
+  renderProductsDatalist();
   renderTxListForCell();
   openBackdrop('txBackdrop');
   setTimeout(()=> $('txAmount').focus(), 0);
@@ -1046,6 +1096,7 @@ async function upsertTxFromForm(e){
 
   rebuildMaps();
   renderSourcesDatalist();
+  renderProductsDatalist();
   renderTxListForCell();
   renderLedger();
 
@@ -1065,6 +1116,7 @@ async function deleteTx(id){
   state.transactions = state.transactions.filter(x=>x.id!==id);
   rebuildMaps();
   renderSourcesDatalist();
+  renderProductsDatalist();
   renderTxListForCell();
   renderLedger();
   showToast('Удалено.');
@@ -1084,8 +1136,59 @@ $('btnTxClear').addEventListener('click', ()=>{
 
 $('btnTxClose').addEventListener('click', ()=> closeBackdrop('txBackdrop'));
 $('txBackdrop').addEventListener('click', (e)=>{ if (e.target===$('txBackdrop')) closeBackdrop('txBackdrop'); });
+
+/* ===== (c) Полное удаление блоков/статей (с подтверждением) ===== */
+async function deleteArticleCascade(articleId){
+  const a = state.articles.find(x=>x.id===articleId);
+  if (!a) return;
+
+  const txIds = state.transactions.filter(t=>t.articleId===articleId).map(t=>t.id);
+  const msg =
+    `Удалить статью "${a.name}" НАВСЕГДА?\n` +
+    `Будет удалено операций: ${txIds.length}.`;
+  if (!confirm(msg)) return;
+
+  if (!confirm('Точно удалить? Это действие нельзя отменить.')) return;
+
+  for (const id of txIds) await dbDelete('transactions', id);
+  await dbDelete('articles', articleId);
+
+  await loadState();
+  await ensureBlockOrderPersisted();
+  renderLedger();
+  renderManagePanel();
+  showToast('Статья удалена.');
+}
+
+async function deleteBlockCascade(blockId){
+  const b = state.blocks.find(x=>x.id===blockId);
+  if (!b) return;
+
+  const arts = state.articles.filter(a=>a.blockId===blockId);
+  const artIds = new Set(arts.map(a=>a.id));
+  const txIds = state.transactions.filter(t=>artIds.has(t.articleId)).map(t=>t.id);
+
+  const msg =
+    `Удалить блок "${b.name}" НАВСЕГДА?\n` +
+    `Будет удалено статей: ${arts.length}.\n` +
+    `Будет удалено операций: ${txIds.length}.`;
+  if (!confirm(msg)) return;
+
+  if (!confirm('Точно удалить? Это действие нельзя отменить.')) return;
+
+  for (const id of txIds) await dbDelete('transactions', id);
+  for (const a of arts) await dbDelete('articles', a.id);
+  await dbDelete('blocks', blockId);
+
+  await loadState();
+  await ensureBlockOrderPersisted();
+  renderLedger();
+  renderManagePanel();
+  showToast('Блок удалён.');
+}
+
 /* ===== Manage panel ===== */
-function renderManageRow({kind, id, title, hidden, blockId}){
+function renderManageRow({kind, id, title, hidden, blockId, moveCtx}){
   const row=document.createElement('div');
   row.style.display='flex'; row.style.gap='8px'; row.style.alignItems='center';
   row.style.flexWrap='wrap'; row.style.marginTop='8px';
@@ -1100,6 +1203,12 @@ function renderManageRow({kind, id, title, hidden, blockId}){
   const btnToggle=document.createElement('button');
   btnToggle.type='button'; btnToggle.textContent = hidden ? 'Восстановить' : 'Скрыть';
 
+  // (c) удалить
+  const btnDelete=document.createElement('button');
+  btnDelete.type='button';
+  btnDelete.textContent='Удалить';
+  btnDelete.className='danger';
+
   btnSave.addEventListener('click', async ()=>{
     const name=(input.value||'').trim();
     if (!name) return showToast('Название не может быть пустым.');
@@ -1110,7 +1219,7 @@ function renderManageRow({kind, id, title, hidden, blockId}){
       const a = state.articles.find(x=>x.id===id); if (!a) return;
       a.name=name; await dbPut('articles', a);
     }
-    await loadState(); renderLedger(); renderManagePanel();
+    await loadState(); await ensureBlockOrderPersisted(); renderLedger(); renderManagePanel();
     showToast('Переименовано.');
   });
 
@@ -1127,11 +1236,41 @@ function renderManageRow({kind, id, title, hidden, blockId}){
       const a = state.articles.find(x=>x.id===id); if (!a) return;
       a.hidden = !a.hidden; await dbPut('articles', a);
     }
-    await loadState(); renderLedger(); renderManagePanel();
+    await loadState(); await ensureBlockOrderPersisted(); renderLedger(); renderManagePanel();
     showToast('Готово.');
   });
 
-  row.appendChild(input); row.appendChild(btnSave); row.appendChild(btnToggle);
+  btnDelete.addEventListener('click', async ()=>{
+    if (kind==='block') return deleteBlockCascade(id);
+    return deleteArticleCascade(id);
+  });
+
+  // (a) кнопки перемещения блоков ▲/▼
+  if (kind==='block' && moveCtx){
+    const btnUp=document.createElement('button');
+    btnUp.type='button'; btnUp.textContent='▲';
+    btnUp.disabled = !moveCtx.canUp;
+
+    const btnDown=document.createElement('button');
+    btnDown.type='button'; btnDown.textContent='▼';
+    btnDown.disabled = !moveCtx.canDown;
+
+    btnUp.addEventListener('click', async ()=>{
+      await moveCtx.move(-1);
+      await loadState(); await ensureBlockOrderPersisted(); renderLedger(); renderManagePanel();
+      showToast('Блок перемещен.');
+    });
+    btnDown.addEventListener('click', async ()=>{
+      await moveCtx.move(+1);
+      await loadState(); await ensureBlockOrderPersisted(); renderLedger(); renderManagePanel();
+      showToast('Блок перемещен.');
+    });
+
+    row.appendChild(btnUp);
+    row.appendChild(btnDown);
+  }
+
+  row.appendChild(input); row.appendChild(btnSave); row.appendChild(btnToggle); row.appendChild(btnDelete);
 
   if (kind==='article' && blockId){
     const b = state.blocks.find(x=>x.id===blockId);
@@ -1146,7 +1285,7 @@ function renderManageRow({kind, id, title, hidden, blockId}){
 
 function fillBlockSelectForManage(){
   const sel = $('articleBlockSelect');
-  const blocks = state.blocks.slice().sort((a,b)=>a.name.localeCompare(b.name,'ru'));
+  const blocks = sortBlocks(state.blocks);
   sel.innerHTML='';
   for (const b of blocks){
     const opt=document.createElement('option');
@@ -1155,14 +1294,46 @@ function fillBlockSelectForManage(){
   }
 }
 
+async function swapBlockOrder(idA, idB){
+  const a = state.blocks.find(x=>x.id===idA);
+  const b = state.blocks.find(x=>x.id===idB);
+  if (!a || !b) return;
+
+  const oa = Number.isFinite(+a.order) ? +a.order : 0;
+  const ob = Number.isFinite(+b.order) ? +b.order : 0;
+
+  a.order = ob;
+  b.order = oa;
+
+  await dbPut('blocks', a);
+  await dbPut('blocks', b);
+}
+
 function renderManagePanel(){
   fillBlockSelectForManage();
 
   const blocksList=$('blocksList');
   blocksList.innerHTML='';
-  const blocks = state.blocks.slice().sort((a,b)=>a.name.localeCompare(b.name,'ru'));
-  for (const b of blocks){
-    blocksList.appendChild(renderManageRow({kind:'block', id:b.id, title:b.name, hidden:!!b.hidden}));
+
+  const ordered = sortBlocks(state.blocks);
+  for (let i=0;i<ordered.length;i++){
+    const b = ordered[i];
+    const moveCtx = {
+      canUp: i>0,
+      canDown: i<ordered.length-1,
+      move: async (dir)=>{
+        const j = i + dir;
+        if (j<0 || j>=ordered.length) return;
+
+        // гарантия наличия order (если старые данные)
+        if (!Number.isFinite(+b.order) || !Number.isFinite(+ordered[j].order)){
+          await ensureBlockOrderPersisted();
+          await loadState();
+        }
+        await swapBlockOrder(ordered[i].id, ordered[j].id);
+      }
+    };
+    blocksList.appendChild(renderManageRow({kind:'block', id:b.id, title:b.name, hidden:!!b.hidden, moveCtx}));
   }
 
   const articlesList=$('articlesList');
@@ -1173,7 +1344,7 @@ function renderManagePanel(){
     byBlock.get(a.blockId).push(a);
   }
 
-  for (const b of blocks){
+  for (const b of ordered){
     const group=document.createElement('div');
     group.style.border='1px solid var(--border)';
     group.style.borderRadius='10px';
@@ -1201,7 +1372,13 @@ function renderManagePanel(){
   }
 }
 
-$('btnMenu').addEventListener('click', ()=>{ renderManagePanel(); openBackdrop('manageBackdrop'); setTimeout(()=> $('newBlockName').focus(), 0); });
+$('btnMenu').addEventListener('click', async ()=>{
+  await loadState();
+  await ensureBlockOrderPersisted();
+  renderManagePanel();
+  openBackdrop('manageBackdrop');
+  setTimeout(()=> $('newBlockName').focus(), 0);
+});
 $('btnManageClose').addEventListener('click', ()=> closeBackdrop('manageBackdrop'));
 $('manageBackdrop').addEventListener('click', (e)=>{ if (e.target===$('manageBackdrop')) closeBackdrop('manageBackdrop'); });
 
@@ -1209,9 +1386,16 @@ $('formAddBlock').addEventListener('submit', async (e)=>{
   e.preventDefault();
   const name=($('newBlockName').value||'').trim();
   if (!name) return showToast('Введите название блока.');
-  await dbPut('blocks',{id:uid(),name,hidden:false});
+
+  // новый блок ставим в конец порядка
+  await loadState();
+  await ensureBlockOrderPersisted();
+  const maxOrder = state.blocks.reduce((m,b)=>Math.max(m, Number.isFinite(+b.order)?+b.order:0), 0);
+
+  await dbPut('blocks',{id:uid(),name,hidden:false,order:maxOrder+1});
+
   $('newBlockName').value='';
-  await loadState(); renderLedger(); renderManagePanel();
+  await loadState(); await ensureBlockOrderPersisted(); renderLedger(); renderManagePanel();
   showToast('Блок добавлен.');
 });
 
@@ -1223,10 +1407,9 @@ $('formAddArticle').addEventListener('submit', async (e)=>{
   if (!name) return showToast('Введите название статьи.');
   await dbPut('articles',{id:uid(),blockId,name,hidden:false});
   $('newArticleName').value='';
-  await loadState(); renderLedger(); renderManagePanel();
+  await loadState(); await ensureBlockOrderPersisted(); renderLedger(); renderManagePanel();
   showToast('Статья добавлена.');
 });
-
 /* ===== Export / Import / Reset ===== */
 function downloadText(filename, text, mime='text/plain'){
   const blob=new Blob([text],{type:mime});
@@ -1335,7 +1518,12 @@ function normalizeImportedPayload(raw){
 
   out.blocks = out.blocks
     .filter(b=>b&&b.id&&b.name)
-    .map(b=>({id:String(b.id),name:String(b.name),hidden:!!b.hidden}));
+    .map(b=>({
+      id:String(b.id),
+      name:String(b.name),
+      hidden:!!b.hidden,
+      order: Number.isFinite(+b.order) ? +b.order : undefined
+    }));
 
   out.articles = out.articles
     .filter(a=>a&&a.id&&a.blockId&&a.name)
@@ -1381,6 +1569,7 @@ async function importJSON(){
     for (const t of payload.transactions) await dbPut('transactions', t);
 
     await loadState();
+    await ensureBlockOrderPersisted();
     ledgerWindow.offset=0;
     renderLedger();
 
@@ -1399,6 +1588,7 @@ async function resetAll(){
   await dbClearAll();
   await ensureInitialData();
   await loadState();
+  await ensureBlockOrderPersisted();
   ledgerWindow.offset=0;
   renderLedger();
   showToast('Сброс выполнен.');
@@ -1570,6 +1760,7 @@ function renderShareChart(rows){
 
 async function applyAnalytics(){
   await loadState();
+  await ensureBlockOrderPersisted();
   const r=parseFilterRange();
   if (r.error){ showToast(r.error); return; }
   const period=$('anPeriod').value;
@@ -1632,6 +1823,7 @@ async function init(){
 
     await ensureInitialData();
     await loadState();
+    await ensureBlockOrderPersisted();
     renderLedger();
 
     showToast(storageBackend==='idb'
