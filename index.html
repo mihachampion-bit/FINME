@@ -170,6 +170,7 @@ small.muted{color:var(--muted)}
   <button id="tabLedger" class="active">Учет</button>
   <button id="tabAnalytics">Аналитика</button>
 </div>
+
 <main>
   <section id="viewLedger" class="view" style="display:block">
     <div class="ledgerShell">
@@ -342,23 +343,42 @@ small.muted{color:var(--muted)}
         <option value="income">Приход</option>
       </select>
 
-      <div class="row">
+      <!-- (c) для приходов блок/статья не нужны -->
+      <div class="row" id="txBlockArticleRow">
         <div><label>Блок</label><select id="txBlock"></select></div>
         <div><label>Статья</label><select id="txArticle"></select></div>
       </div>
 
-      <label>Источник/магазин</label>
+      <label id="txSourceLabel">Источник/магазин</label>
       <input id="txSource" list="sourcesDatalist" placeholder="Например: Яндекс-Лавка" />
       <datalist id="sourcesDatalist"></datalist>
 
+      <!-- (c) источники приходов -->
+      <datalist id="incomeSourcesDatalist">
+        <option value="зарплата"></option>
+        <option value="бонус"></option>
+        <option value="фриланс"></option>
+        <option value="проценты по вкладу"></option>
+        <option value="другое"></option>
+      </datalist>
+
       <label>Описание</label>
-      <!-- (b) продукты/описания тоже сохраняются как опции -->
+      <!-- продукты/описания тоже сохраняются как опции -->
       <input id="txTitleInput" list="productsDatalist" placeholder="Например: кефир Простоквашино" />
       <datalist id="productsDatalist"></datalist>
 
       <div class="row">
         <div><label>Сумма</label><input id="txAmount" inputmode="decimal" placeholder="0,0" /></div>
         <div><label>Время (опц.)</label><input id="txTime" inputmode="numeric" placeholder="14:30" /></div>
+      </div>
+
+      <!-- (b) доставка как доп. сумма к расходу -->
+      <div id="txDeliveryBox" style="display:none">
+        <label>Доставка (опц.)</label>
+        <input id="txDeliveryAmount" inputmode="decimal" placeholder="0,0" />
+        <div style="margin-top:4px;font-size:12px;color:var(--muted)">
+          Добавит отдельную операцию “Доставка” в тот же день.
+        </div>
       </div>
 
       <label>Комментарий (опц.)</label>
@@ -389,9 +409,21 @@ const FRACTION_DIGITS = 1;
 
 const DB_NAME = 'finme-db';
 const DB_VERSION = 1;
-const SCHEMA_VERSION = 2; // (a)(c) добавили order и операции удаления
+const SCHEMA_VERSION = 3; // (a) суммы по блоку; (b) доставка; (c) приход одним рядом
 
 const LS_KEY = 'finme-storage-v1';
+
+/* (c) системные сущности для приходов */
+const INCOME_BLOCK_NAME = 'ПРИХОДЫ';
+const INCOME_ARTICLE_NAME = 'Итого';
+let INCOME_BLOCK_ID = null;
+let INCOME_ARTICLE_ID = null;
+
+/* (b) доставка как отдельная статья (создается автоматически) */
+const DELIVERY_BLOCK_NAME = 'ДОСТАВКА';
+const DELIVERY_ARTICLE_NAME = 'Доставка';
+let DELIVERY_BLOCK_ID = null;
+let DELIVERY_ARTICLE_ID = null;
 
 /* ===== Helpers ===== */
 const $ = (id) => document.getElementById(id);
@@ -447,7 +479,6 @@ function getISOWeek(date){
   const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
   return Math.ceil((((d - yearStart)/86400000) + 1)/7);
 }
-
 /* ===== Storage (IndexedDB with localStorage fallback) ===== */
 let storageBackend = 'idb'; // 'idb' | 'ls'
 let db = null;
@@ -583,12 +614,14 @@ async function dbClearAll(){
     });
   }
 }
-/* ===== State (as required) ===== */
+
+/* ===== State ===== */
 const state = {
   blocks: [], articles: [], dates: [], transactions: [],
   blockById: new Map(), articleById: new Map(),
   sources: [],
-  products: [], // (b) опции для "Описание/продукт"
+  products: [],
+  incomeSources: [],
   currentCell: null
 };
 
@@ -596,17 +629,31 @@ function rebuildMaps(){
   state.blockById = new Map(state.blocks.map(b=>[b.id,b]));
   state.articleById = new Map(state.articles.map(a=>[a.id,a]));
 
+  // расходы: источники/магазины
   const s = new Set();
+  // продукты (из title)
   const p = new Set();
+  // приходы: источники дохода
+  const inc = new Set();
+
   for (const t of state.transactions){
-    if (t.source && String(t.source).trim()) s.add(String(t.source).trim());
+    if (t.type==='income'){
+      if (t.source && String(t.source).trim()) inc.add(String(t.source).trim());
+    } else {
+      if (t.source && String(t.source).trim()) s.add(String(t.source).trim());
+    }
     if (t.title && String(t.title).trim()) p.add(String(t.title).trim());
   }
+
   state.sources = Array.from(s).sort((a,b)=>a.localeCompare(b,'ru'));
   state.products = Array.from(p).sort((a,b)=>a.localeCompare(b,'ru'));
+
+  const defaults = ['зарплата','бонус','фриланс','проценты по вкладу','другое'];
+  for (const d of defaults) inc.add(d);
+  state.incomeSources = Array.from(inc).sort((a,b)=>a.localeCompare(b,'ru'));
 }
 
-/* (a) Порядок блоков: поле order (если старые данные без order — аккуратно проставим) */
+/* порядок блоков */
 function blockSortKey(b){
   const o = Number.isFinite(+b.order) ? +b.order : null;
   return {has:(o!==null), order:(o!==null?o:0), name:String(b.name||'')};
@@ -621,8 +668,6 @@ function sortBlocks(arr){
   });
 }
 async function ensureBlockOrderPersisted(){
-  // Если у каких-то блоков нет order — назначаем order по текущему "старому" виду (по имени),
-  // чтобы визуально ничего не поменялось.
   const missing = state.blocks.some(b=>!Number.isFinite(+b.order));
   if (!missing) return;
 
@@ -635,6 +680,53 @@ async function ensureBlockOrderPersisted(){
     i++;
   }
   for (const b of state.blocks) await dbPut('blocks', b);
+}
+
+/* (b)(c) гарантируем системные категории */
+async function ensureSpecialCategories(){
+  await loadState();
+  await ensureBlockOrderPersisted();
+
+  // INCOME: блок (скрытый, системный) + одна статья
+  let ib = state.blocks.find(x=>String(x.name||'').toUpperCase()===INCOME_BLOCK_NAME);
+  if (!ib){
+    const maxOrder = state.blocks.reduce((m,b)=>Math.max(m, Number.isFinite(+b.order)?+b.order:0), 0);
+    ib = {id:uid(), name:INCOME_BLOCK_NAME, hidden:true, order:maxOrder+10, system:true};
+    await dbPut('blocks', ib);
+  } else {
+    // если вдруг блок был видимым — оставим скрытым, чтобы не мешал таблице расходов
+    if (!ib.hidden){ ib.hidden=true; await dbPut('blocks', ib); }
+    if (!ib.system){ ib.system=true; await dbPut('blocks', ib); }
+  }
+
+  let ia = state.articles.find(x=>x.blockId===ib.id && String(x.name||'').toUpperCase()===INCOME_ARTICLE_NAME.toUpperCase());
+  if (!ia){
+    ia = {id:uid(), blockId:ib.id, name:INCOME_ARTICLE_NAME, hidden:false, system:true};
+    await dbPut('articles', ia);
+  } else {
+    if (!ia.system){ ia.system=true; await dbPut('articles', ia); }
+  }
+
+  // DELIVERY: отдельный блок+статья (не системные, чтобы пользователь мог видеть/управлять при желании)
+  let dbk = state.blocks.find(x=>String(x.name||'').toUpperCase()===DELIVERY_BLOCK_NAME);
+  if (!dbk){
+    const maxOrder = state.blocks.reduce((m,b)=>Math.max(m, Number.isFinite(+b.order)?+b.order:0), 0);
+    dbk = {id:uid(), name:DELIVERY_BLOCK_NAME, hidden:false, order:maxOrder+1};
+    await dbPut('blocks', dbk);
+  }
+  let dar = state.articles.find(x=>x.blockId===dbk.id && String(x.name||'').toUpperCase()===DELIVERY_ARTICLE_NAME.toUpperCase());
+  if (!dar){
+    dar = {id:uid(), blockId:dbk.id, name:DELIVERY_ARTICLE_NAME, hidden:false};
+    await dbPut('articles', dar);
+  }
+
+  await loadState();
+  rebuildMaps();
+
+  INCOME_BLOCK_ID = ib.id;
+  INCOME_ARTICLE_ID = ia.id;
+  DELIVERY_BLOCK_ID = dbk.id;
+  DELIVERY_ARTICLE_ID = dar.id;
 }
 
 async function seedDefaults(){
@@ -682,9 +774,7 @@ async function loadState(){
   state.articles = await dbGetAll('articles');
   state.dates = (await dbGetAll('dates')).map(x=>x.iso).sort((a,b)=>a<b?1:a>b?-1:0); // DESC
   state.transactions = await dbGetAll('transactions');
-  rebuildMaps();
 }
-
 /* ===== Windowing dates ===== */
 const ledgerWindow = { size: 45, offset: 0 };
 function clampWindow(){
@@ -696,6 +786,7 @@ function visibleDates(){
   return state.dates.slice(ledgerWindow.offset, Math.min(state.dates.length, ledgerWindow.offset + ledgerWindow.size));
 }
 
+/* суммы по ячейкам */
 function buildCellSums(){
   const m = new Map();
   for (const t of state.transactions){
@@ -705,14 +796,35 @@ function buildCellSums(){
   return m;
 }
 
-/* ===== Ledger render (ONE table => no desync) ===== */
+/* (a) суммы по блоку/дню для расходов */
+function buildBlockExpenseSums(){
+  const m = new Map(); // key: dateISO|blockId => sum
+  for (const t of state.transactions){
+    if (t.type!=='expense') continue;
+    const k = `${t.dateISO}|${t.blockId}`;
+    m.set(k, (m.get(k)||0) + (t.amount||0));
+  }
+  return m;
+}
+
+/* (c) суммы приходов по дню (единая ячейка) */
+function buildIncomeByDate(){
+  const m = new Map(); // dateISO => sum
+  for (const t of state.transactions){
+    if (t.type!=='income') continue;
+    m.set(t.dateISO, (m.get(t.dateISO)||0) + (t.amount||0));
+  }
+  return m;
+}
+
+/* ===== Ledger render ===== */
 function renderLedger(){
   const host = $('tableWrap');
   host.innerHTML = '';
 
-  // (a) блоки теперь идут в сохраненном порядке, а не по имени
-  const blocks = sortBlocks(state.blocks.filter(b=>!b.hidden));
-  const articles = state.articles.filter(a=>!a.hidden);
+  // показываем только НЕ скрытые и НЕ системные блоки (приходы — отдельной строкой)
+  const blocks = sortBlocks(state.blocks.filter(b=>!b.hidden && !b.system));
+  const articles = state.articles.filter(a=>!a.hidden && !a.system);
 
   const byBlock = new Map();
   for (const a of articles){
@@ -723,6 +835,8 @@ function renderLedger(){
 
   const dates = visibleDates();
   const sums = buildCellSums();
+  const blockSums = buildBlockExpenseSums();
+  const incomeByDate = buildIncomeByDate();
 
   const total = state.dates.length;
   const start = ledgerWindow.offset + 1;
@@ -766,6 +880,33 @@ function renderLedger(){
 
   const tbody = document.createElement('tbody');
 
+  /* (c) первая строка: приход по дню (единая сумма) */
+  const trInc = document.createElement('tr');
+  trInc.className = 'blockRow';
+
+  const tdIncLeft = document.createElement('td');
+  tdIncLeft.className = 'leftCell';
+  tdIncLeft.textContent = 'ПРИХОДЫ (ИТОГО)';
+  trInc.appendChild(tdIncLeft);
+
+  for (const iso of dates){
+    const tdE = document.createElement('td');
+    tdE.innerHTML = '&nbsp;';
+
+    const tdI = document.createElement('td');
+    tdI.className = 'amount';
+    tdI.dataset.date = iso;
+    tdI.dataset.articleId = INCOME_ARTICLE_ID;
+    tdI.dataset.type = 'income';
+    const sum = incomeByDate.get(iso) || 0;
+    tdI.textContent = sum ? formatAmount(sum) : '';
+
+    trInc.appendChild(tdE);
+    trInc.appendChild(tdI);
+  }
+  tbody.appendChild(trInc);
+
+  /* блоки расходов */
   for (const b of blocks){
     const trB = document.createElement('tr');
     trB.className = 'blockRow';
@@ -775,11 +916,22 @@ function renderLedger(){
     tdLB.textContent = b.name;
     trB.appendChild(tdLB);
 
-    for (let i=0;i<dates.length*2;i++){
-      const td = document.createElement('td');
-      td.innerHTML = '&nbsp;';
-      trB.appendChild(td);
+    for (const iso of dates){
+      // (a) по блоку показываем СУММУ РАСХОДОВ за день
+      const k = `${iso}|${b.id}`;
+      const sumB = blockSums.get(k) || 0;
+
+      const tdE = document.createElement('td');
+      tdE.textContent = sumB ? formatAmount(sumB) : '';
+
+      // приход по статье/блоку больше не используется
+      const tdI = document.createElement('td');
+      tdI.innerHTML = '&nbsp;';
+
+      trB.appendChild(tdE);
+      trB.appendChild(tdI);
     }
+
     tbody.appendChild(trB);
 
     const list = byBlock.get(b.id) || [];
@@ -793,9 +945,7 @@ function renderLedger(){
 
       for (const iso of dates){
         const kE = `${iso}|${a.id}|expense`;
-        const kI = `${iso}|${a.id}|income`;
         const sumE = sums.get(kE) || 0;
-        const sumI = sums.get(kI) || 0;
 
         const tdE = document.createElement('td');
         tdE.className = 'amount';
@@ -804,12 +954,9 @@ function renderLedger(){
         tdE.dataset.type = 'expense';
         tdE.textContent = sumE ? formatAmount(sumE) : '';
 
+        // (c) приходов на уровне статей нет
         const tdI = document.createElement('td');
-        tdI.className = 'amount';
-        tdI.dataset.date = iso;
-        tdI.dataset.articleId = a.id;
-        tdI.dataset.type = 'income';
-        tdI.textContent = sumI ? formatAmount(sumI) : '';
+        tdI.innerHTML = '&nbsp;';
 
         tr.appendChild(tdE);
         tr.appendChild(tdI);
@@ -845,7 +992,6 @@ async function addDateFlow(){
 
   await dbPut('dates', { iso });
 
-  // обновим state
   state.dates.push(iso);
   state.dates.sort((a,b)=>a<b?1:a>b?-1:0);
   ledgerWindow.offset = 0;
@@ -854,9 +1000,9 @@ async function addDateFlow(){
 }
 $('btnAddDate').addEventListener('click', addDateFlow);
 
-/* ===== Tx modal ===== */
+/* ===== Tx modal helpers ===== */
 function fillBlockSelect(sel, selectedId=null, includeHidden=false){
-  const blocks = sortBlocks(state.blocks.filter(b=>includeHidden?true:!b.hidden));
+  const blocks = sortBlocks(state.blocks.filter(b=>includeHidden?true:(!b.hidden && !b.system)));
   sel.innerHTML = '';
   for (const b of blocks){
     const opt = document.createElement('option');
@@ -868,7 +1014,7 @@ function fillBlockSelect(sel, selectedId=null, includeHidden=false){
 function fillArticleSelect(sel, blockId, selectedId=null, includeHidden=false){
   const arts = state.articles
     .filter(a=>a.blockId===blockId)
-    .filter(a=>includeHidden?true:!a.hidden)
+    .filter(a=>includeHidden?true:(!a.hidden && !a.system))
     .slice().sort((a,b)=>a.name.localeCompare(b.name,'ru'));
   sel.innerHTML = '';
   for (const a of arts){
@@ -883,6 +1029,15 @@ function renderSourcesDatalist(){
   const dl = $('sourcesDatalist');
   dl.innerHTML = '';
   for (const s of state.sources.slice(0, 300)){
+    const opt = document.createElement('option');
+    opt.value = s;
+    dl.appendChild(opt);
+  }
+}
+function renderIncomeSourcesDatalist(){
+  const dl = $('incomeSourcesDatalist');
+  dl.innerHTML = '';
+  for (const s of state.incomeSources.slice(0, 300)){
     const opt = document.createElement('option');
     opt.value = s;
     dl.appendChild(opt);
@@ -912,18 +1067,57 @@ function normalizeTime(str){
   return `${String(hh).padStart(2,'0')}:${String(mm).padStart(2,'0')}`;
 }
 
+function setTxUiByType(type){
+  const isIncome = type==='income';
+  $('txBlockArticleRow').style.display = isIncome ? 'none' : 'flex';
+
+  $('txSourceLabel').textContent = isIncome ? 'Источник дохода' : 'Источник/магазин';
+  $('txSource').setAttribute('list', isIncome ? 'incomeSourcesDatalist' : 'sourcesDatalist');
+  $('txSource').placeholder = isIncome ? 'Например: зарплата' : 'Например: Яндекс-Лавка';
+
+  // продукты/описание для приходов оставляем (можно писать "за что"), но без datalist если хочется — оставим как есть
+  // доставка только для расходов и только если НЕ редактирование
+  const showDelivery = (!isIncome) && !$('txEditId').value && (state.currentCell && state.currentCell.articleId !== DELIVERY_ARTICLE_ID);
+  $('txDeliveryBox').style.display = showDelivery ? 'block' : 'none';
+  if (!showDelivery) $('txDeliveryAmount').value = '';
+}
+
 function openTxModal(dateISO, articleId, defaultType){
+  const isIncomeCell = (defaultType==='income' && articleId===INCOME_ARTICLE_ID);
+
+  state.currentCell = { dateISO, articleId, defaultType };
+
+  if (isIncomeCell){
+    $('txMeta').textContent = `${formatHumanDate(dateISO)} • ПРИХОДЫ (итого)`;
+    $('txType').value = 'income';
+    $('txEditId').value='';
+
+    // принудительно: доходы живут в системной статье
+    $('txSource').value='';
+    $('txTitleInput').value='';
+    $('txAmount').value='';
+    $('txTime').value='';
+    $('txNote').value='';
+    $('txDeliveryAmount').value='';
+
+    renderIncomeSourcesDatalist();
+    renderProductsDatalist();
+    setTxUiByType('income');
+
+    renderTxListForCell();
+    openBackdrop('txBackdrop');
+    setTimeout(()=> $('txAmount').focus(), 0);
+    return;
+  }
+
+  // обычная статья расходов
   const art = state.articleById.get(articleId);
   if (!art){ showToast('Статья не найдена.'); return; }
   const blk = state.blockById.get(art.blockId);
 
-  state.currentCell = { dateISO, articleId, defaultType };
-
-  $('txMeta').textContent =
-    `${formatHumanDate(dateISO)} • ${blk?blk.name:'—'} → ${art.name} • Колонка: ${defaultType==='expense'?'Расходы':'Приходы'}`;
-
+  $('txMeta').textContent = `${formatHumanDate(dateISO)} • ${blk?blk.name:'—'} → ${art.name} • Колонка: Расходы`;
   $('txEditId').value='';
-  $('txType').value=defaultType;
+  $('txType').value='expense';
 
   fillBlockSelect($('txBlock'), art.blockId, false);
   fillArticleSelect($('txArticle'), art.blockId, art.id, false);
@@ -933,15 +1127,22 @@ function openTxModal(dateISO, articleId, defaultType){
   $('txAmount').value='';
   $('txTime').value='';
   $('txNote').value='';
+  $('txDeliveryAmount').value='';
 
   renderSourcesDatalist();
+  renderIncomeSourcesDatalist();
   renderProductsDatalist();
+  setTxUiByType('expense');
+
   renderTxListForCell();
   openBackdrop('txBackdrop');
   setTimeout(()=> $('txAmount').focus(), 0);
 }
 
 function cellTxs(dateISO, articleId, type){
+  if (type==='income' && articleId===INCOME_ARTICLE_ID){
+    return state.transactions.filter(t=>t.dateISO===dateISO && t.type==='income' && t.blockId===INCOME_BLOCK_ID && t.articleId===INCOME_ARTICLE_ID);
+  }
   return state.transactions.filter(t=>t.dateISO===dateISO && t.articleId===articleId && t.type===type);
 }
 
@@ -988,8 +1189,12 @@ function renderTxListForCell(){
     const parts=[];
     if (t.time) parts.push(t.time);
     if (t.source) parts.push(t.source);
-    if (b) parts.push(b.name);
-    if (a) parts.push(a.name);
+    if (t.type==='expense'){
+      if (b) parts.push(b.name);
+      if (a) parts.push(a.name);
+    } else {
+      parts.push('Приход');
+    }
     meta.textContent=parts.join(' • ');
 
     const note=document.createElement('div');
@@ -1025,6 +1230,20 @@ function loadTxToForm(t){
   $('txEditId').value=t.id;
   $('txType').value=t.type;
 
+  if (t.type==='income'){
+    // приход — без блока/статьи
+    $('txSource').value=t.source||'';
+    $('txTitleInput').value=t.title||'';
+    $('txAmount').value=String(t.amount).replace('.',',');
+    $('txTime').value=t.time||'';
+    $('txNote').value=t.note||'';
+    $('txDeliveryAmount').value='';
+    setTxUiByType('income');
+    showToast('Режим редактирования.');
+    return;
+  }
+
+  // расход
   fillBlockSelect($('txBlock'), t.blockId, false);
   fillArticleSelect($('txArticle'), t.blockId, t.articleId, false);
 
@@ -1033,10 +1252,13 @@ function loadTxToForm(t){
   $('txAmount').value=String(t.amount).replace('.',',');
   $('txTime').value=t.time||'';
   $('txNote').value=t.note||'';
+  $('txDeliveryAmount').value='';
+  setTxUiByType('expense');
 
   showToast('Режим редактирования.');
 }
 
+$('txType').addEventListener('change', ()=> setTxUiByType($('txType').value));
 $('txBlock').addEventListener('change', ()=> fillArticleSelect($('txArticle'), $('txBlock').value, null, false));
 
 /* Quick buttons */
@@ -1047,6 +1269,8 @@ function quickSetType(type){
   $('txAmount').value = '';
   $('txTime').value = '';
   $('txNote').value = '';
+  $('txDeliveryAmount').value = '';
+  setTxUiByType(type);
   setTimeout(()=> $('txAmount').focus(), 0);
   showToast(type==='expense' ? 'Быстро: Расход' : 'Быстро: Приход');
 }
@@ -1061,8 +1285,6 @@ async function upsertTxFromForm(e){
 
   const dateISO = c.dateISO;
   const type = $('txType').value;
-  const blockId = $('txBlock').value;
-  const articleId = $('txArticle').value;
 
   const source = ($('txSource').value||'').trim();
   const title = ($('txTitleInput').value||'').trim();
@@ -1070,12 +1292,25 @@ async function upsertTxFromForm(e){
   const time = normalizeTime($('txTime').value);
   const note = ($('txNote').value||'').trim();
 
-  if (!blockId) return showToast('Выберите блок.');
-  if (!articleId) return showToast('Выберите статью.');
   if (!amount || amount<=0) return showToast('Сумма должна быть больше 0.');
   if (time === null) return showToast('Некорректное время. Пример: 09:05');
 
   const editId = $('txEditId').value;
+
+  let blockId = null;
+  let articleId = null;
+
+  if (type==='income'){
+    blockId = INCOME_BLOCK_ID;
+    articleId = INCOME_ARTICLE_ID;
+    if (!source) return showToast('Укажите источник дохода (например: зарплата).');
+  } else {
+    blockId = $('txBlock').value;
+    articleId = $('txArticle').value;
+    if (!blockId) return showToast('Выберите блок.');
+    if (!articleId) return showToast('Выберите статью.');
+  }
+
   const tx = {
     id: editId || uid(),
     dateISO,
@@ -1091,12 +1326,35 @@ async function upsertTxFromForm(e){
 
   await dbPut('transactions', tx);
 
-  const idx = state.transactions.findIndex(x=>x.id===tx.id);
-  if (idx>=0) state.transactions[idx]=tx; else state.transactions.push(tx);
+  // (b) доставка — только для НОВОГО расхода (не для редактирования) и только если введена
+  if (type==='expense' && !editId){
+    const deliveryAmount = parseAmount(($('txDeliveryAmount').value||'').trim());
+    if (deliveryAmount && deliveryAmount>0){
+      const deliveryTx = {
+        id: uid(),
+        dateISO,
+        type:'expense',
+        blockId: DELIVERY_BLOCK_ID,
+        articleId: DELIVERY_ARTICLE_ID,
+        source: source,
+        title: 'Доставка',
+        amount: deliveryAmount,
+        time: time || '',
+        note: (title ? `К заказу: ${title}` : '') + (note ? (title ? '\n' : '') + note : '')
+      };
+      await dbPut('transactions', deliveryTx);
+    }
+  }
 
+  // обновим state
+  await loadState();
   rebuildMaps();
+
   renderSourcesDatalist();
+  renderIncomeSourcesDatalist();
   renderProductsDatalist();
+
+  // важно: если сейчас открыта ячейка доходов — она хранит INCOME_ARTICLE_ID
   renderTxListForCell();
   renderLedger();
 
@@ -1105,6 +1363,8 @@ async function upsertTxFromForm(e){
   $('txAmount').value='';
   $('txTime').value='';
   $('txNote').value='';
+  $('txDeliveryAmount').value='';
+  setTxUiByType($('txType').value);
   setTimeout(()=> $('txAmount').focus(), 0);
 
   showToast('Сохранено.');
@@ -1113,9 +1373,10 @@ async function upsertTxFromForm(e){
 async function deleteTx(id){
   if (!confirm('Удалить операцию?')) return;
   await dbDelete('transactions', id);
-  state.transactions = state.transactions.filter(x=>x.id!==id);
+  await loadState();
   rebuildMaps();
   renderSourcesDatalist();
+  renderIncomeSourcesDatalist();
   renderProductsDatalist();
   renderTxListForCell();
   renderLedger();
@@ -1129,7 +1390,9 @@ $('btnTxClear').addEventListener('click', ()=>{
   $('txAmount').value='';
   $('txTime').value='';
   $('txNote').value='';
-  $('txType').value = state.currentCell ? state.currentCell.defaultType : 'expense';
+  $('txDeliveryAmount').value='';
+  $('txType').value = state.currentCell ? (state.currentCell.defaultType==='income' ? 'income' : 'expense') : 'expense';
+  setTxUiByType($('txType').value);
   setTimeout(()=> $('txAmount').focus(), 0);
   showToast('Форма очищена.');
 });
@@ -1137,7 +1400,7 @@ $('btnTxClear').addEventListener('click', ()=>{
 $('btnTxClose').addEventListener('click', ()=> closeBackdrop('txBackdrop'));
 $('txBackdrop').addEventListener('click', (e)=>{ if (e.target===$('txBackdrop')) closeBackdrop('txBackdrop'); });
 
-/* ===== (c) Полное удаление блоков/статей (с подтверждением) ===== */
+/* ===== Manage panel (как было, но скрываем системные “приходы”) ===== */
 async function deleteArticleCascade(articleId){
   const a = state.articles.find(x=>x.id===articleId);
   if (!a) return;
@@ -1155,6 +1418,7 @@ async function deleteArticleCascade(articleId){
 
   await loadState();
   await ensureBlockOrderPersisted();
+  rebuildMaps();
   renderLedger();
   renderManagePanel();
   showToast('Статья удалена.');
@@ -1182,12 +1446,12 @@ async function deleteBlockCascade(blockId){
 
   await loadState();
   await ensureBlockOrderPersisted();
+  rebuildMaps();
   renderLedger();
   renderManagePanel();
   showToast('Блок удалён.');
 }
 
-/* ===== Manage panel ===== */
 function renderManageRow({kind, id, title, hidden, blockId, moveCtx}){
   const row=document.createElement('div');
   row.style.display='flex'; row.style.gap='8px'; row.style.alignItems='center';
@@ -1203,7 +1467,6 @@ function renderManageRow({kind, id, title, hidden, blockId, moveCtx}){
   const btnToggle=document.createElement('button');
   btnToggle.type='button'; btnToggle.textContent = hidden ? 'Восстановить' : 'Скрыть';
 
-  // (c) удалить
   const btnDelete=document.createElement('button');
   btnDelete.type='button';
   btnDelete.textContent='Удалить';
@@ -1219,7 +1482,7 @@ function renderManageRow({kind, id, title, hidden, blockId, moveCtx}){
       const a = state.articles.find(x=>x.id===id); if (!a) return;
       a.name=name; await dbPut('articles', a);
     }
-    await loadState(); await ensureBlockOrderPersisted(); renderLedger(); renderManagePanel();
+    await loadState(); await ensureBlockOrderPersisted(); rebuildMaps(); renderLedger(); renderManagePanel();
     showToast('Переименовано.');
   });
 
@@ -1236,7 +1499,7 @@ function renderManageRow({kind, id, title, hidden, blockId, moveCtx}){
       const a = state.articles.find(x=>x.id===id); if (!a) return;
       a.hidden = !a.hidden; await dbPut('articles', a);
     }
-    await loadState(); await ensureBlockOrderPersisted(); renderLedger(); renderManagePanel();
+    await loadState(); await ensureBlockOrderPersisted(); rebuildMaps(); renderLedger(); renderManagePanel();
     showToast('Готово.');
   });
 
@@ -1245,7 +1508,6 @@ function renderManageRow({kind, id, title, hidden, blockId, moveCtx}){
     return deleteArticleCascade(id);
   });
 
-  // (a) кнопки перемещения блоков ▲/▼
   if (kind==='block' && moveCtx){
     const btnUp=document.createElement('button');
     btnUp.type='button'; btnUp.textContent='▲';
@@ -1257,12 +1519,12 @@ function renderManageRow({kind, id, title, hidden, blockId, moveCtx}){
 
     btnUp.addEventListener('click', async ()=>{
       await moveCtx.move(-1);
-      await loadState(); await ensureBlockOrderPersisted(); renderLedger(); renderManagePanel();
+      await loadState(); await ensureBlockOrderPersisted(); rebuildMaps(); renderLedger(); renderManagePanel();
       showToast('Блок перемещен.');
     });
     btnDown.addEventListener('click', async ()=>{
       await moveCtx.move(+1);
-      await loadState(); await ensureBlockOrderPersisted(); renderLedger(); renderManagePanel();
+      await loadState(); await ensureBlockOrderPersisted(); rebuildMaps(); renderLedger(); renderManagePanel();
       showToast('Блок перемещен.');
     });
 
@@ -1285,7 +1547,7 @@ function renderManageRow({kind, id, title, hidden, blockId, moveCtx}){
 
 function fillBlockSelectForManage(){
   const sel = $('articleBlockSelect');
-  const blocks = sortBlocks(state.blocks);
+  const blocks = sortBlocks(state.blocks.filter(b=>!b.system)); // не даем добавлять статьи в системный блок приходов
   sel.innerHTML='';
   for (const b of blocks){
     const opt=document.createElement('option');
@@ -1315,7 +1577,7 @@ function renderManagePanel(){
   const blocksList=$('blocksList');
   blocksList.innerHTML='';
 
-  const ordered = sortBlocks(state.blocks);
+  const ordered = sortBlocks(state.blocks.filter(b=>!b.system)); // скрываем системный блок приходов
   for (let i=0;i<ordered.length;i++){
     const b = ordered[i];
     const moveCtx = {
@@ -1324,8 +1586,6 @@ function renderManagePanel(){
       move: async (dir)=>{
         const j = i + dir;
         if (j<0 || j>=ordered.length) return;
-
-        // гарантия наличия order (если старые данные)
         if (!Number.isFinite(+b.order) || !Number.isFinite(+ordered[j].order)){
           await ensureBlockOrderPersisted();
           await loadState();
@@ -1339,7 +1599,7 @@ function renderManagePanel(){
   const articlesList=$('articlesList');
   articlesList.innerHTML='';
   const byBlock=new Map();
-  for (const a of state.articles){
+  for (const a of state.articles.filter(x=>!x.system)){
     if (!byBlock.has(a.blockId)) byBlock.set(a.blockId, []);
     byBlock.get(a.blockId).push(a);
   }
@@ -1375,6 +1635,7 @@ function renderManagePanel(){
 $('btnMenu').addEventListener('click', async ()=>{
   await loadState();
   await ensureBlockOrderPersisted();
+  await ensureSpecialCategories();
   renderManagePanel();
   openBackdrop('manageBackdrop');
   setTimeout(()=> $('newBlockName').focus(), 0);
@@ -1387,7 +1648,6 @@ $('formAddBlock').addEventListener('submit', async (e)=>{
   const name=($('newBlockName').value||'').trim();
   if (!name) return showToast('Введите название блока.');
 
-  // новый блок ставим в конец порядка
   await loadState();
   await ensureBlockOrderPersisted();
   const maxOrder = state.blocks.reduce((m,b)=>Math.max(m, Number.isFinite(+b.order)?+b.order:0), 0);
@@ -1395,7 +1655,8 @@ $('formAddBlock').addEventListener('submit', async (e)=>{
   await dbPut('blocks',{id:uid(),name,hidden:false,order:maxOrder+1});
 
   $('newBlockName').value='';
-  await loadState(); await ensureBlockOrderPersisted(); renderLedger(); renderManagePanel();
+  await loadState(); await ensureBlockOrderPersisted(); await ensureSpecialCategories();
+  rebuildMaps(); renderLedger(); renderManagePanel();
   showToast('Блок добавлен.');
 });
 
@@ -1407,9 +1668,11 @@ $('formAddArticle').addEventListener('submit', async (e)=>{
   if (!name) return showToast('Введите название статьи.');
   await dbPut('articles',{id:uid(),blockId,name,hidden:false});
   $('newArticleName').value='';
-  await loadState(); await ensureBlockOrderPersisted(); renderLedger(); renderManagePanel();
+  await loadState(); await ensureBlockOrderPersisted(); await ensureSpecialCategories();
+  rebuildMaps(); renderLedger(); renderManagePanel();
   showToast('Статья добавлена.');
 });
+
 /* ===== Export / Import / Reset ===== */
 function downloadText(filename, text, mime='text/plain'){
   const blob=new Blob([text],{type:mime});
@@ -1464,7 +1727,8 @@ function csvEscape(v){
   return s;
 }
 async function exportCSV(){
-  await loadState(); rebuildMaps();
+  await loadState();
+  rebuildMaps();
   const header=['dateISO','date','type','block','article','source','title','amount','time','note'];
   const rows=[header.join(';')];
 
@@ -1522,12 +1786,19 @@ function normalizeImportedPayload(raw){
       id:String(b.id),
       name:String(b.name),
       hidden:!!b.hidden,
-      order: Number.isFinite(+b.order) ? +b.order : undefined
+      order: Number.isFinite(+b.order) ? +b.order : undefined,
+      system: !!b.system
     }));
 
   out.articles = out.articles
     .filter(a=>a&&a.id&&a.blockId&&a.name)
-    .map(a=>({id:String(a.id),blockId:String(a.blockId),name:String(a.name),hidden:!!a.hidden}));
+    .map(a=>({
+      id:String(a.id),
+      blockId:String(a.blockId),
+      name:String(a.name),
+      hidden:!!a.hidden,
+      system: !!a.system
+    }));
 
   out.transactions = out.transactions
     .filter(t=>t&&t.id&&t.dateISO&&t.type&&t.blockId&&t.articleId&&t.amount)
@@ -1553,7 +1824,6 @@ async function importJSON(){
     const file=await pickFile('.json,application/json');
     if (!file) return;
 
-    // auto-backup
     const snap=await snapshotData();
     downloadText(`FINME-auto-backup-before-import-${toISODate(new Date())}.json`, JSON.stringify(snap,null,2), 'application/json');
 
@@ -1570,6 +1840,9 @@ async function importJSON(){
 
     await loadState();
     await ensureBlockOrderPersisted();
+    await ensureSpecialCategories();
+    rebuildMaps();
+
     ledgerWindow.offset=0;
     renderLedger();
 
@@ -1589,6 +1862,9 @@ async function resetAll(){
   await ensureInitialData();
   await loadState();
   await ensureBlockOrderPersisted();
+  await ensureSpecialCategories();
+  rebuildMaps();
+
   ledgerWindow.offset=0;
   renderLedger();
   showToast('Сброс выполнен.');
@@ -1598,7 +1874,7 @@ $('btnExport').addEventListener('click', exportFlow);
 $('btnImport').addEventListener('click', importJSON);
 $('btnReset').addEventListener('click', resetAll);
 
-/* ===== Analytics (Chart.js graceful) ===== */
+/* ===== Analytics (без изменений логики) ===== */
 let chartLibReady=false, chartTotals=null, chartShare=null;
 
 function loadChartJs(){
@@ -1760,7 +2036,7 @@ function renderShareChart(rows){
 
 async function applyAnalytics(){
   await loadState();
-  await ensureBlockOrderPersisted();
+  rebuildMaps();
   const r=parseFilterRange();
   if (r.error){ showToast(r.error); return; }
   const period=$('anPeriod').value;
@@ -1812,7 +2088,6 @@ document.addEventListener('keydown',(e)=>{
 /* ===== Init ===== */
 async function init(){
   try{
-    // 1) пытаемся IDB
     try{
       await openDB();
       storageBackend = 'idb';
@@ -1824,6 +2099,13 @@ async function init(){
     await ensureInitialData();
     await loadState();
     await ensureBlockOrderPersisted();
+    await ensureSpecialCategories();
+    rebuildMaps();
+
+    renderSourcesDatalist();
+    renderIncomeSourcesDatalist();
+    renderProductsDatalist();
+
     renderLedger();
 
     showToast(storageBackend==='idb'
