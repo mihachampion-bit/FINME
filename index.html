@@ -457,8 +457,13 @@ function parseAmount(str){
   return Number.isFinite(n) ? n : null;
 }
 
-/* Dates */
-function toISODate(d){ return d.toISOString().slice(0,10); }
+/* Dates (FIX: без UTC, чтобы не уезжало на день) */
+function toISODate(d){
+  const y = d.getFullYear();
+  const m = String(d.getMonth()+1).padStart(2,'0');
+  const day = String(d.getDate()).padStart(2,'0');
+  return `${y}-${m}-${day}`;
+}
 function fromISODate(iso){ const [y,m,dd]=iso.split('-').map(Number); return new Date(y,m-1,dd); }
 function formatHumanDate(iso){ return fromISODate(iso).toLocaleDateString('ru-RU'); }
 function parseHumanDate(str){
@@ -848,6 +853,7 @@ async function changeColumnDateFlow(oldISO){
   }
 }
 
+/* FIX: гарантированно удаляем старую дату (иначе “переименовать” выглядит как “не сработало”) */
 async function renameDateSafe(oldISO, newISO){
   await dbPut('dates', { iso: newISO });
 
@@ -856,13 +862,7 @@ async function renameDateSafe(oldISO, newISO){
     await dbPut('transactions', {...t, dateISO:newISO});
   }
 
-  // после переноса старую дату удаляем безопасно
-  // (перепроверим фактически по текущему state после loadState в вызывающей функции)
-  // но на всякий случай: если вдруг не осталось транзакций — удалим
-  const stillOld = state.transactions.some(t=>t.dateISO===oldISO);
-  if (!stillOld){
-    await dbDelete('dates', oldISO);
-  }
+  await dbDelete('dates', oldISO);
 }
 
 async function swapDatesSafe(aISO, bISO){
