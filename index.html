@@ -107,6 +107,10 @@ main{height:calc(100vh - 86px);min-height:0;display:flex;flex-direction:column}
 .ledgerTable td.amount:hover{background:#eef2ff}
 .ledgerTable td.sumCell{text-align:right;min-width:var(--cellW);color:#111;font-weight:800}
 
+/* Date head clickable */
+.ledgerTable th.dateHead{cursor:pointer}
+.ledgerTable th.dateHead:hover{background:#eef2ff}
+
 /* ===== Analytics ===== */
 .analytics{padding:12px;overflow:auto}
 .panel{background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);padding:10px;margin-bottom:12px}
@@ -197,6 +201,7 @@ small.muted{color:var(--muted)}
       <div class="footerHelp">
         <b>Подсказки:</b><br/>
         • Клик/тап по сумме открывает “Детализацию”.<br/>
+        • Нажми на дату в шапке, чтобы переименовать колонку или сделать обмен датами.<br/>
         • Самый свежий день — слева. При больших периодах листай окно “Новее/Старее”.<br/>
         • Хранилище: IndexedDB, с авто-fallback на localStorage для Safari.
       </div>
@@ -738,7 +743,6 @@ function buildExpenseByArticleDate(){
   }
   return m;
 }
-
 function buildIncomeByDate(){
   const m = new Map();
   for (const t of state.transactions){
@@ -747,7 +751,6 @@ function buildIncomeByDate(){
   }
   return m;
 }
-
 function buildBlockExpenseByDate(){
   const m = new Map(); // `${dateISO}|${blockId}` => sum expense
   for (const t of state.transactions){
@@ -757,7 +760,6 @@ function buildBlockExpenseByDate(){
   }
   return m;
 }
-
 function buildTotalExpenseByDate(){
   const m = new Map(); // dateISO => total expense
   for (const t of state.transactions){
@@ -767,7 +769,66 @@ function buildTotalExpenseByDate(){
   return m;
 }
 
-/* ===== Ledger render (ONE table => no desync) ===== */
+/* ===== Change date for whole column (header click) ===== */
+async function changeColumnDateFlow(oldISO){
+  const oldHuman = formatHumanDate(oldISO);
+  const input = prompt(`Изменить дату колонки ${oldHuman} на (ДД.ММ.ГГГГ):`, oldHuman);
+  if (!input) return;
+
+  const d = parseHumanDate(input.trim());
+  if (!d){ showToast('Некорректная дата. Пример: 07.01.2026'); return; }
+
+  const newISO = toISODate(d);
+  if (newISO === oldISO) return;
+
+  const exists = state.dates.includes(newISO);
+
+  if (exists){
+    const ok = confirm(
+      `Дата ${formatHumanDate(newISO)} уже есть.\n\n` +
+      `Сделать ОБМЕН колонками?\n` +
+      `• операции ${oldHuman} перейдут на ${formatHumanDate(newISO)}\n` +
+      `• операции ${formatHumanDate(newISO)} перейдут на ${oldHuman}`
+    );
+    if (!ok) return;
+    await swapDates(oldISO, newISO);
+  } else {
+    const ok = confirm(
+      `Переименовать колонку:\n${oldHuman} → ${formatHumanDate(newISO)}\n\n` +
+      `Все операции в этой колонке переедут на новую дату. Продолжить?`
+    );
+    if (!ok) return;
+    await renameDate(oldISO, newISO);
+  }
+
+  await loadState();
+  renderLedger();
+  if ($('manageBackdrop').style.display==='flex') renderManagePanel();
+  if ($('txBackdrop').style.display==='flex') renderTxListForCell();
+  showToast('Дата колонки изменена.');
+}
+
+async function renameDate(oldISO, newISO){
+  await dbDelete('dates', oldISO);
+  await dbPut('dates', { iso: newISO });
+
+  const affected = state.transactions.filter(t=>t.dateISO===oldISO);
+  for (const t of affected){
+    await dbPut('transactions', {...t, dateISO:newISO});
+  }
+}
+
+async function swapDates(aISO, bISO){
+  const aTx = state.transactions.filter(t=>t.dateISO===aISO);
+  const bTx = state.transactions.filter(t=>t.dateISO===bISO);
+  const tmpISO = '__tmp__' + uid();
+
+  for (const t of aTx) await dbPut('transactions', {...t, dateISO:tmpISO});
+  for (const t of bTx) await dbPut('transactions', {...t, dateISO:aISO});
+  for (const t of aTx) await dbPut('transactions', {...t, dateISO:bISO});
+}
+
+/* ===== Ledger render ===== */
 function renderLedger(){
   const host = $('tableWrap');
   host.innerHTML = '';
@@ -810,6 +871,9 @@ function renderLedger(){
     const th = document.createElement('th');
     th.colSpan = 2;
     th.textContent = formatHumanDate(iso);
+    th.title = 'Нажмите, чтобы изменить дату колонки';
+    th.dataset.date = iso;
+    th.classList.add('dateHead');
     r1.appendChild(th);
   }
 
@@ -830,7 +894,7 @@ function renderLedger(){
 
   const tbody = document.createElement('tbody');
 
-  /* ТОТАЛ: расходы автосумма дня, приходы — ввод как раньше */
+  /* ТОТАЛ: расходы автосумма дня, приходы — ввод */
   {
     const trTotal = document.createElement('tr');
     trTotal.className = 'totalRow';
@@ -868,7 +932,7 @@ function renderLedger(){
     tdLB.textContent = b.name;
     trB.appendChild(tdLB);
 
-    /* Сумма по блоку на каждый день в колонке "Расходы" (в шапке блока) */
+    /* Сумма по блоку на каждый день в колонке "Расходы" */
     for (const iso of dates){
       const k = `${iso}|${b.id}`;
       const sumBlock = blockExpenseByDate.get(k) || 0;
@@ -906,7 +970,7 @@ function renderLedger(){
         tdE.textContent = sumE ? formatAmount(sumE) : '';
 
         const tdI = document.createElement('td');
-        tdI.innerHTML = '&nbsp;'; // доходы по статьям не выводим
+        tdI.innerHTML = '&nbsp;';
 
         tr.appendChild(tdE);
         tr.appendChild(tdI);
@@ -920,7 +984,13 @@ function renderLedger(){
   table.appendChild(tbody);
   host.appendChild(table);
 
-  table.addEventListener('click', (e)=>{
+  table.addEventListener('click', async (e)=>{
+    const th = e.target.closest('th.dateHead');
+    if (th && th.dataset.date){
+      await changeColumnDateFlow(th.dataset.date);
+      return;
+    }
+
     const td = e.target.closest('td.amount');
     if (!td) return;
     const dateISO = td.dataset.date;
@@ -1265,13 +1335,11 @@ async function upsertTxFromForm(e){
 
   rebuildMaps();
 
-  // если пользователь поправил дату — переносим “контекст ячейки” на новую дату
+  // синхронизируем контекст с новой датой
   if (state.currentCell){
     state.currentCell.dateISO = dateISO;
     state.currentCell.defaultType = type;
-    if (type === 'income') state.currentCell.articleId = null;
-    // для expense articleId оставляем как есть (пользователь мог менять блок/статью в форме)
-    if (type === 'expense') state.currentCell.articleId = articleId;
+    state.currentCell.articleId = (type==='expense') ? articleId : null;
   }
 
   renderTxMeta();
@@ -1313,7 +1381,7 @@ $('btnTxClear').addEventListener('click', ()=>{
 $('btnTxClose').addEventListener('click', ()=> closeBackdrop('txBackdrop'));
 $('txBackdrop').addEventListener('click', (e)=>{ if (e.target===$('txBackdrop')) closeBackdrop('txBackdrop'); });
 
-/* ===== Manage panel ===== */
+/* ===== Manage panel (move/hide/delete + article delete) ===== */
 function renderManageRow({kind, id, title, hidden, blockId, blockIndex, blocksSortedLen}){
   const row=document.createElement('div');
   row.style.display='flex'; row.style.gap='8px'; row.style.alignItems='center';
@@ -1409,7 +1477,7 @@ function renderManageRow({kind, id, title, hidden, blockId, blockIndex, blocksSo
   });
 
   async function moveBlock(delta){
-    const blocksSorted = sortBlocks(state.blocks); // включая скрытые
+    const blocksSorted = sortBlocks(state.blocks);
     const idx = blocksSorted.findIndex(x=>x.id===id);
     const j = idx + delta;
     if (idx<0 || j<0 || j>=blocksSorted.length) return;
@@ -1699,7 +1767,6 @@ async function importJSON(){
     const file=await pickFile('.json,application/json');
     if (!file) return;
 
-    // auto-backup
     const snap=await snapshotData();
     downloadText(`FINME-auto-backup-before-import-${toISODate(new Date())}.json`, JSON.stringify(snap,null,2), 'application/json');
 
